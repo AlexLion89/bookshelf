@@ -65,7 +65,7 @@ function hit(b, wd) {
 
 function emptyFilter() {
   return { genres: new Set(), scales: {}, warn: new Set(), audience: new Set(), length: new Set(),
-           places: new Set(), eras: new Set(), words: [] };
+           places: new Set(), eras: new Set(), themes: new Set(), words: [] };
 }
 
 const norm = s => (s || "").toLowerCase().replace(/ё/g, "е");
@@ -88,7 +88,7 @@ async function load() {
   }
   if (!state.lib.length) state.lib = await (await fetch(url)).json();
   for (const b of state.lib) {
-    b._text = norm([b.title, b.bm_title, ...b.authors, b.orig, ...b.themes, ...b.genres, ...(b.contains || []),
+    b._text = norm([b.title, b.bm_title, ...b.authors, b.orig, ...b.themes, ...(b.tags || []), ...b.genres, ...(b.contains || []),
                     b.series && b.series.name, b.series && b.series.sub].join(" | "));
   }
   const count = key => {
@@ -97,6 +97,8 @@ async function load() {
     return [...c.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
   };
   state.vocab = { genres: count("genres"), places: count("places"), regions: count("regions"), eras: count("eras"), themes: count("themes") };
+  const t = await fetch("data/themes.json").catch(() => null);
+  state.themeGroups = t && t.ok ? await t.json() : {};
   buildFilters();
   renderPick();
   renderAll();
@@ -118,6 +120,13 @@ function buildFilters() {
   fill("f-len", LENGTH, v => chip(v, f.length.has(v) ? "on" : "", toggleSet(f.length, v)));
   fill("f-places", state.vocab.regions, v => chip(v, f.places.has(v) ? "on" : "", toggleSet(f.places, v)));
   fill("f-eras", state.vocab.eras, v => chip(v, f.eras.has(v) ? "on" : "", toggleSet(f.eras, v)));
+  // Темы — по разделам словаря, внутри раздела самые частые первыми.
+  const used = new Map(state.vocab.themes.map((t, i) => [t, i]));
+  const box = document.getElementById("f-themes");
+  if (box) box.replaceChildren(...Object.entries(state.themeGroups || {}).map(([grp, ts]) =>
+    el("details", { class: "tgroup" }, el("summary", {}, grp),
+      el("div", { class: "chips" }, ...ts.filter(t => used.has(t)).sort((a, b) => used.get(a) - used.get(b))
+        .map(t => chip(t, f.themes.has(t) ? "on" : "", toggleSet(f.themes, t)))))));
 }
 
 function syncAndRender() { buildFilters(); renderUnderstood(); renderPick(); }
@@ -154,7 +163,7 @@ function renderUnderstood() {
   f.genres.forEach(g => parts.push(chip(g, "on")));
   for (const [k, v] of Object.entries(f.scales)) parts.push(chip(SCALES[k], v > 0 ? "plus" : "minus"));
   f.warn.forEach(k => parts.push(chip("без: " + WARN[k], "on warn")));
-  [...f.audience, ...f.length, ...f.places, ...f.eras].forEach(v => parts.push(chip(v, "on")));
+  [...f.audience, ...f.length, ...f.places, ...f.eras, ...f.themes].forEach(v => parts.push(chip(v, "on")));
   if (f.words.length) parts.push(chip("темы: " + f.words.map(w => w.replace(/\(.*$/, "") + "…").join(" / "), "on"));
   const box = document.getElementById("understood");
   box.replaceChildren(...(parts.length ? [el("span", {}, "Понял так: "), ...parts] : []));
@@ -174,6 +183,7 @@ function checks(b, f) {
   if (f.length.size) out.push(f.length.has(b.length));
   if (f.places.size) out.push(b.places.some(p => f.places.has(p)) || b.regions.some(r => f.places.has(r)));
   if (f.eras.size) out.push(b.eras.some(e => f.eras.has(e)));
+  if (f.themes.size) out.push(b.themes.some(t => f.themes.has(t)));
   if (f.words.length) out.push(f.words.some(wd => hit(b, wd)));
   return out;
 }

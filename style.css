@@ -66,3 +66,5 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .nocover.big { width: 110px; height: 165px; font-size: 13px; line-height: 1.2; }
 .nocover .nct { font-weight: 600; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
 .nocover .nca { opacity: .85; }
+.tgroup { margin: 4px 0; } .tgroup summary { cursor: pointer; font-size: 14px; color: var(--muted); padding: 2px 0; }
+.tgroup .chips { margin: 4px 0 8px; }
