@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Книжная полка Alex Lion</title>
+<meta name="theme-color" content="#2f5d8a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>📚 Книжная полка <span id="owner-badge" hidden>· режим владельца</span></h1>
+  <nav>
+    <button data-tab="pick" class="active">Подобрать</button>
+    <button data-tab="like">Похоже на…</button>
+    <button data-tab="all">Все книги</button>
+  </nav>
+</header>
+
+<main>
+  <section id="tab-pick" class="tab active">
+    <div class="ask">
+      <input id="ask" type="search" placeholder="Что хочется почитать? Например: смешное фэнтези, коротко, без жестокости к животным" autocomplete="off">
+    </div>
+    <div id="understood" class="understood"></div>
+    <details id="filters" class="filters">
+      <summary>Фильтры</summary>
+      <div class="fgroup"><h3>Жанры</h3><div id="f-genres" class="chips"></div></div>
+      <div class="fgroup"><h3>Настроение и свойства <small>нажмите: ＋ побольше, − поменьше</small></h3><div id="f-scales" class="chips"></div></div>
+      <div class="fgroup"><h3>Осторожно — исключить</h3><div id="f-warn" class="chips"></div></div>
+      <div class="fgroup"><h3>Кому</h3><div id="f-aud" class="chips"></div></div>
+      <div class="fgroup"><h3>Объём</h3><div id="f-len" class="chips"></div></div>
+      <div class="fgroup"><h3>Где</h3><div id="f-places" class="chips"></div></div>
+      <div class="fgroup"><h3>Когда</h3><div id="f-eras" class="chips"></div></div>
+      <button id="reset" class="link">Сбросить всё</button>
+    </details>
+    <div id="pick-count" class="count"></div>
+    <div id="pick-list" class="list"></div>
+  </section>
+
+  <section id="tab-like" class="tab">
+    <p class="hint">Назовите несколько книг, которые понравились, — подберу похожие из этой библиотеки и объясню чем.</p>
+    <input id="like-search" type="search" placeholder="Начните вводить название или автора…" autocomplete="off">
+    <div id="like-suggest" class="suggest"></div>
+    <div id="like-chosen" class="chips chosen"></div>
+    <div id="like-list" class="list"></div>
+  </section>
+
+  <section id="tab-all" class="tab">
+    <input id="all-search" type="search" placeholder="Название, автор, тема, рассказ из сборника…" autocomplete="off">
+    <div id="all-count" class="count"></div>
+    <div id="all-list" class="list"></div>
+  </section>
+</main>
+
+<dialog id="card"></dialog>
+<footer>Данные: BookMix, FantLab. Профили книг размечены с помощью ИИ и могут ошибаться.</footer>
+<script src="app.js"></script>
+</body>
+</html>
