@@ -366,10 +366,19 @@ function showSeries(name) {
 }
 
 // ---------- карточки ----------
+// Без обложки — цветной корешок с названием; цвет стабилен для автора, чтобы рассказы одного
+// автора выглядели одной серией.
+function coverEl(b, cls) {
+  if (b.cover) return el("img", { class: cls, src: b.cover, alt: "", loading: "lazy" });
+  let h = 0;
+  for (const ch of b.authors.join()) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return el("div", { class: "nocover " + cls, style: `background:hsl(${h} 38% 42%)` },
+    el("span", { class: "nct" }, b.title), el("span", { class: "nca" }, b.authors[0] || ""));
+}
 const stars = r => r ? "★".repeat(r) + "☆".repeat(5 - r) : "";
 function renderList(id, books, extra) {
   document.getElementById(id).replaceChildren(...books.map(b => el("div", { class: "book", onclick: () => openCard(b) },
-    el("img", { src: b.cover || "", alt: "", loading: "lazy", referrerpolicy: "no-referrer" }),
+    coverEl(b, "thumb"),
     el("div", {},
       el("div", { class: "t" }, b.title),
       el("div", { class: "a" }, b.authors.join(", "), " ", el("span", { class: "stars" }, stars(b.rating))),
@@ -396,7 +405,7 @@ function openCard(b) {
   dlg.replaceChildren(el("div", { class: "cardbody" },
     el("button", { class: "close", onclick: () => dlg.close() }, "×"),
     el("div", { class: "cardhead" },
-      b.cover ? el("img", { src: b.cover, alt: "", referrerpolicy: "no-referrer" }) : null,
+      coverEl(b, "big"),
       el("div", {},
         el("h2", {}, b.title),
         el("div", { class: "meta" }, b.authors.join(", "), b.orig ? ` · ${b.orig}` : "", b.year ? ` · ${b.year}` : ""),
