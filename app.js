@@ -96,7 +96,7 @@ async function load() {
     for (const b of state.lib) for (const v of b[key]) c.set(v, (c.get(v) || 0) + 1);
     return [...c.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
   };
-  state.vocab = { genres: count("genres"), places: count("places").slice(0, 30), eras: count("eras"), themes: count("themes") };
+  state.vocab = { genres: count("genres"), places: count("places"), regions: count("regions"), eras: count("eras"), themes: count("themes") };
   buildFilters();
   renderPick();
   renderAll();
@@ -116,7 +116,7 @@ function buildFilters() {
   fill("f-warn", Object.keys(WARN), k => chip("без: " + WARN[k], f.warn.has(k) ? "on warn" : "", toggleSet(f.warn, k)));
   fill("f-aud", AUDIENCE, v => chip(v, f.audience.has(v) ? "on" : "", toggleSet(f.audience, v)));
   fill("f-len", LENGTH, v => chip(v, f.length.has(v) ? "on" : "", toggleSet(f.length, v)));
-  fill("f-places", state.vocab.places, v => chip(v, f.places.has(v) ? "on" : "", toggleSet(f.places, v)));
+  fill("f-places", state.vocab.regions, v => chip(v, f.places.has(v) ? "on" : "", toggleSet(f.places, v)));
   fill("f-eras", state.vocab.eras, v => chip(v, f.eras.has(v) ? "on" : "", toggleSet(f.eras, v)));
 }
 
@@ -139,7 +139,7 @@ function parseAsk(text) {
     const stem = norm(g).split(" ")[0].slice(0, 6);
     if (stem.length >= 5 && t.includes(stem) && !t.includes("без " + stem)) f.genres.add(g);
   }
-  for (const p of state.vocab.places) if (t.includes(norm(p).slice(0, Math.max(4, norm(p).length - 2)))) f.places.add(p);
+  for (const p of [...state.vocab.places, ...state.vocab.regions]) if (t.includes(norm(p).slice(0, Math.max(4, norm(p).length - 2)))) f.places.add(p);
   for (const e of state.vocab.eras) if (e.length > 5 && t.includes(norm(e).slice(0, e.length - 1))) f.eras.add(e);
   // оставшиеся значимые слова ищем по темам, названиям и авторам
   const stop = /^(хочу|что|нибудь|почитать|книгу|книга|книги|про|о|об|и|или|но|не|без|с|со|в|на|для|по|чтобы|очень|было|быть|чтото|что-то|какое|какую|коротко|легкое|лёгкое|смешное|интересное)$/;
@@ -172,7 +172,7 @@ function checks(b, f) {
   for (const k of ["child_abuse", "suicide", "profanity"]) if (f.warn.has(k)) out.push(!w[k]);
   if (f.audience.size) out.push(b.audience.some(a => f.audience.has(a)));
   if (f.length.size) out.push(f.length.has(b.length));
-  if (f.places.size) out.push(b.places.some(p => f.places.has(p)));
+  if (f.places.size) out.push(b.places.some(p => f.places.has(p)) || b.regions.some(r => f.places.has(r)));
   if (f.eras.size) out.push(b.eras.some(e => f.eras.has(e)));
   if (f.words.length) out.push(f.words.some(wd => hit(b, wd)));
   return out;
