@@ -447,15 +447,15 @@ const stem = s => norm(s).replace(/[^а-яa-z0-9 ]+/g, " ").trim();
 const surname = a => { const w = stem(a).split(/\s+/); return (w[w.length - 1] || "").slice(0, 6); };
 function awardIndex() {
   if (state.awIdx) return state.awIdx;
-  const byFl = new Map(), byName = new Map(), byAuthor = new Map();
+  const byFl = new Map(), byName = new Map(), byAuthor = new Map(), titles = new Set();
   for (const b of state.lib) {
     if (b.fantlab) byFl.set(b.fantlab, b);
     const sn = b.authors.map(surname);
     const parts = [b.title, b.bm_title, b.orig, ...(b.contains || []), ...b.title.split(/\. /)];
-    for (const t of parts) if (t) for (const s of sn) byName.set(stem(t) + "|" + s, b);
+    for (const t of parts) if (t) { titles.add(stem(t)); for (const s of sn) byName.set(stem(t) + "|" + s, b); }
     for (const s of sn) byAuthor.set(s, (byAuthor.get(s) || 0) + 1);
   }
-  return (state.awIdx = { byFl, byName, byAuthor });
+  return (state.awIdx = { byFl, byName, byAuthor, titles });
 }
 function awardHit(it) {
   const ix = awardIndex(), s = surname(it.a.split(/,| и /)[0]);
@@ -568,6 +568,85 @@ document.getElementById("sg-form").addEventListener("submit", async e => {
 });
 document.getElementById("sg-from").value = localStorage.getItem("sg-from") || "";
 
+// ---------- квизы ----------
+const qzKey = q => q.u + "|" + q.q.slice(0, 40);
+const qzLog = () => JSON.parse(localStorage.getItem("quiz-log") || "{}");
+function qzOnShelf(q) {
+  const ix = awardIndex();
+  return q.au.some(a => ix.byAuthor.get(surname(a))) || q.wk.some(w => ix.titles.has(stem(w)));
+}
+async function openQuiz() {
+  if (!state.quiz) {
+    state.quiz = await (await fetch("data/quiz.json")).json();
+    state.qzFilter = { sections: new Set(), shelf: false, fresh: true };
+    document.getElementById("qz-source").textContent = "Вопросы: " + state.quiz.source + ". Авторы вопросов указаны на странице турнира.";
+  }
+  renderQuizFilters();
+  if (!state.qzCur) nextQuiz();
+}
+function qzPool() {
+  const f = state.qzFilter, log = qzLog();
+  return state.quiz.questions.filter(q => (!f.sections.size || f.sections.has(q.s)) && (!f.shelf || qzOnShelf(q)) && (!f.fresh || !log[qzKey(q)]));
+}
+function renderQuizFilters() {
+  const f = state.qzFilter, secs = [...new Set(state.quiz.questions.map(q => q.s).filter(Boolean))];
+  const toggle = v => () => { f.sections.has(v) ? f.sections.delete(v) : f.sections.add(v); renderQuizFilters(); nextQuiz(); };
+  document.getElementById("qz-filters").replaceChildren(
+    ...secs.map(v => chip(v, f.sections.has(v) ? "on" : "", toggle(v))),
+    chip("про книги с полки", f.shelf ? "on" : "", () => { f.shelf = !f.shelf; renderQuizFilters(); nextQuiz(); }),
+    chip("только новые", f.fresh ? "on" : "", () => { f.fresh = !f.fresh; renderQuizFilters(); nextQuiz(); }));
+  const log = Object.values(qzLog()), yes = log.filter(Boolean).length;
+  document.getElementById("qz-stats").textContent = `Вопросов в подборке: ${qzPool().length}` + (log.length ? ` · отвечено ${log.length}, знали ${yes} (${Math.round(100 * yes / log.length)}%)` : "") +
+    " · статистика хранится в этом браузере";
+}
+function nextQuiz() {
+  const pool = qzPool();
+  state.qzCur = pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+  renderQuizCard(false);
+}
+function renderQuizCard(open) {
+  const q = state.qzCur, box = document.getElementById("qz-card");
+  if (!q) { box.replaceChildren(el("div", { class: "count" }, "В подборке вопросов не осталось — снимите фильтр «только новые».")); return; }
+  const mark = ok => () => { const log = qzLog(); log[qzKey(q)] = ok ? 1 : 0; localStorage.setItem("quiz-log", JSON.stringify(log)); renderQuizFilters(); nextQuiz(); };
+  box.replaceChildren(
+    el("div", { class: "meta" }, [q.s, q.th].filter(Boolean).join(" · ")),
+    el("p", { class: "qz-q" }, q.q),
+    open ? el("div", {},
+      el("p", { class: "qz-a" }, "Ответ: ", el("b", {}, q.a)),
+      q.c ? el("p", { class: "meta" }, q.c) : null,
+      el("p", { class: "meta" }, el("a", { href: `https://db.chgk.info/tour/${encodeURIComponent(q.u)}`, target: "_blank", rel: "noopener" }, q.t)),
+      el("div", { class: "chips" }, chip("✓ знал", "plus", mark(true)), chip("✗ не знал", "minus", mark(false)), chip("пропустить", "", nextQuiz)))
+      : el("div", { class: "chips" }, chip("Показать ответ", "on", () => renderQuizCard(true)), chip("другой вопрос", "", nextQuiz)));
+}
+function renderQuizRead() {
+  const ix = awardIndex(), qz = state.quiz;
+  const authors = qz.authors.slice(0, 60).map(a => {
+    const n = ix.byAuthor.get(surname(a.name)) || 0;
+    return el("div", { class: "aw-row" + (n ? " read" : "") }, el("span", { class: "aw-mark" }, n ? "✓" : "·"),
+      a.name, el("span", { class: "meta" }, ` — в вопросах ${a.score}` + (n ? `, у вас книг: ${n}` : "")));
+  });
+  const works = qz.works.slice(0, 120).map(w => {
+    const h = awardHit({ t: w.title, a: w.author || "" });
+    const name = `«${w.title}»` + (w.author ? " — " + w.author : "");
+    return el("div", { class: "aw-row" + (h ? " read" : "") }, el("span", { class: "aw-mark" }, h ? (h.b && h.b.fav ? "❤" : "✓") : "·"),
+      h && h.b ? el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(h.b); } }, name) : name,
+      el("span", { class: "meta" }, ` — вопросов: ${w.n}`));
+  });
+  const unread = qz.works.slice(0, 120).filter(w => !awardHit({ t: w.title, a: w.author || "" })).length;
+  document.getElementById("qz-read").replaceChildren(
+    el("p", { class: "hint" }, "Что чаще всего встречается в литературных вопросах «Своей игры», «Эрудиток», «Бескрылок» и тематических турниров. Серым — то, чего нет на полке."),
+    el("h3", {}, `Книги (не прочитано ${unread} из 120)`), ...works,
+    el("h3", {}, "Авторы"), ...authors);
+}
+document.getElementById("qz-mode-train").addEventListener("click", e => {
+  e.target.classList.add("on"); document.getElementById("qz-mode-read").classList.remove("on");
+  document.getElementById("qz-train").hidden = false; document.getElementById("qz-read").hidden = true;
+});
+document.getElementById("qz-mode-read").addEventListener("click", e => {
+  e.target.classList.add("on"); document.getElementById("qz-mode-train").classList.remove("on");
+  document.getElementById("qz-train").hidden = true; document.getElementById("qz-read").hidden = false; renderQuizRead();
+});
+
 // ---------- циклы ----------
 function seriesLabel(b) {
   const se = b.series;
@@ -677,6 +756,7 @@ document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("cli
   document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
   if (btn.dataset.tab === "awards") openAwards();
   if (btn.dataset.tab === "suggest") openSuggest();
+  if (btn.dataset.tab === "quiz") openQuiz();
 }));
 let askTimer;
 document.getElementById("ask").addEventListener("input", e => {

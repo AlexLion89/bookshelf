@@ -89,3 +89,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .sg-picked { font-size: 14px; color: var(--minus); }
 .sg-item { cursor: default; margin-bottom: 8px; }
 .sg-hidden { opacity: 0.45; }
+.qz-filters { margin: 10px 0; }
+.qz-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 8px 0; }
+.qz-q { font-size: 17px; line-height: 1.45; }
+.qz-a { font-size: 16px; }

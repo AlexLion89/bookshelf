@@ -21,6 +21,7 @@
     <button data-tab="me" id="me-btn" hidden>Мне почитать</button>
     <button data-tab="awards">Премии</button>
     <button data-tab="suggest">Предложить книгу</button>
+    <button data-tab="quiz">Квизы</button>
   </nav>
 </header>
 
@@ -101,6 +102,17 @@
     </form>
     <h3>Уже посоветовали</h3>
     <div id="sg-list"></div>
+  </section>
+
+  <section id="tab-quiz" class="tab">
+    <div class="chips"><button class="chip on" id="qz-mode-train">Тренажёр</button><button class="chip" id="qz-mode-read">Что читать для квизов</button></div>
+    <div id="qz-train">
+      <div id="qz-filters" class="chips qz-filters"></div>
+      <div id="qz-card" class="qz-card"></div>
+      <div id="qz-stats" class="count"></div>
+    </div>
+    <div id="qz-read" hidden></div>
+    <p class="meta" id="qz-source"></p>
   </section>
 
   <section id="tab-me" class="tab">
