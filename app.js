@@ -445,23 +445,52 @@ function renderMe() {
 // ---------- премии ----------
 const stem = s => norm(s).replace(/[^а-яa-z0-9 ]+/g, " ").trim();
 const surname = a => { const w = stem(a).split(/\s+/); return (w[w.length - 1] || "").slice(0, 6); };
+// Названия сравниваются по словам: числа словами → цифры («Двенадцать стульев» = «12 стульев»), служебные
+// слова выброшены, слово — первые 5 букв («экспресс» = «экспрессе»). Так ловятся и укороченные названия
+// («Восточный экспресс», «Трое в лодке»), которыми пользуются квизы.
+const NUMS = { один: 1, два: 2, три: 3, четыре: 4, пять: 5, шесть: 6, семь: 7, восемь: 8, девять: 9, десять: 10,
+  одиннадцать: 11, двенадцать: 12, тринадцать: 13, пятнадцать: 15, двадцать: 20, тридцать: 30, сорок: 40,
+  пятьдесят: 50, сто: 100, тысяча: 1000 };
+const STOPW = new Set(["в", "во", "и", "на", "не", "с", "со", "о", "об", "по", "к", "из", "за", "от", "для", "или", "а", "the", "a", "of", "and"]);
+const toks = s => new Set(stem(s).split(/\s+/).filter(w => w && !STOPW.has(w)).map(w => String(NUMS[w] ?? w).slice(0, 5)));
+function titleLike(q, b, strict) {
+  let inter = 0;
+  for (const w of q) if (b.has(w)) inter++;
+  if (q.size === 1 && b.size === 1) return !strict && inter === 1;
+  const jac = inter / (q.size + b.size - inter);
+  if (strict) return (inter === q.size && q.size >= 3) || jac >= 0.75;
+  return (inter === q.size && q.size >= 2) || (inter === b.size && b.size >= 2) || (jac >= 0.6 && inter >= 2);
+}
 function awardIndex() {
   if (state.awIdx) return state.awIdx;
-  const byFl = new Map(), byName = new Map(), byAuthor = new Map(), titles = new Set();
+  const byFl = new Map(), byName = new Map(), byAuthor = new Map(), bySur = new Map(), byTok = new Map(), titles = new Set();
   for (const b of state.lib) {
     if (b.fantlab) byFl.set(b.fantlab, b);
     const sn = b.authors.map(surname);
-    const parts = [b.title, b.bm_title, b.orig, ...(b.contains || []), ...b.title.split(/\. /)];
-    for (const t of parts) if (t) { titles.add(stem(t)); for (const s of sn) byName.set(stem(t) + "|" + s, b); }
-    for (const s of sn) byAuthor.set(s, (byAuthor.get(s) || 0) + 1);
+    const parts = [b.title, b.bm_title, b.orig, ...(b.contains || []), ...b.title.split(/\. /)].filter(Boolean);
+    b._tk = parts.map(toks);
+    for (const t of parts) { titles.add(stem(t)); for (const s of sn) byName.set(stem(t) + "|" + s, b); }
+    for (const s of sn) { byAuthor.set(s, (byAuthor.get(s) || 0) + 1); if (!bySur.has(s)) bySur.set(s, []); bySur.get(s).push(b); }
+    for (const tk of b._tk) for (const w of tk) { if (!byTok.has(w)) byTok.set(w, new Set()); byTok.get(w).add(b); }
   }
-  return (state.awIdx = { byFl, byName, byAuthor, titles });
+  return (state.awIdx = { byFl, byName, byAuthor, bySur, byTok, titles, memo: new Map() });
 }
 function awardHit(it) {
-  const ix = awardIndex(), s = surname(it.a.split(/,| и /)[0]);
+  const ix = awardIndex(), s = surname((it.a || "").split(/,| и /)[0]);
   if (!it.t) return ix.byAuthor.get(s) ? { n: ix.byAuthor.get(s) } : null;
-  const b = (it.fl && ix.byFl.get(it.fl)) || ix.byName.get(stem(it.t) + "|" + s);
-  return b ? { b } : null;
+  const key = it.t + "|" + it.a + "|" + (it.fl || "");
+  if (ix.memo.has(key)) return ix.memo.get(key);
+  let b = (it.fl && ix.byFl.get(it.fl)) || ix.byName.get(stem(it.t) + "|" + s);
+  const q = toks(it.t);
+  if (!b && q.size) b = (ix.bySur.get(s) || []).find(x => x._tk.some(t => titleLike(q, t, false)));
+  // Автор у книг из квизов угадан по соседству в тексте вопроса — длинному названию верим и без него.
+  if (!b && q.size >= 2) {
+    const rare = [...q].map(w => ix.byTok.get(w) || new Set()).sort((x, y) => x.size - y.size)[0];
+    b = [...rare].find(x => x._tk.some(t => titleLike(q, t, true)));
+  }
+  const res = b ? { b } : null;
+  ix.memo.set(key, res);
+  return res;
 }
 function awardStats(aw) {
   const read = aw.items.filter(awardHit).length;
@@ -475,8 +504,28 @@ async function openAwards() {
   }
   renderAwards();
 }
+const showCovers = () => localStorage.getItem("covers") === "1";
+// Плитка: обложка с полки, иначе превью FantLab, иначе цветной корешок с названием.
+function tile(title, author, img, h, link) {
+  let pic;
+  if (h && h.b) pic = coverEl(h.b, "tile-img");
+  else if (img) {
+    pic = el("img", { class: "tile-img", src: "https://fantlab.ru" + img, alt: "", loading: "lazy", referrerpolicy: "no-referrer" });
+    pic.addEventListener("error", () => pic.replaceWith(coverEl({ title, authors: [author || ""] }, "tile-img")));
+  } else pic = coverEl({ title, authors: [author || ""] }, "tile-img");
+  const mark = h ? (h.b && h.b.fav ? "❤ " : "✓ ") : "";
+  const onclick = h && h.b ? () => openCard(h.b) : link ? () => window.open(link, "_blank", "noopener") : null;
+  return el("div", { class: "tile" + (h ? " read" : ""), onclick }, pic,
+    el("div", { class: "tile-t" }, mark + title), author && author !== title ? el("div", { class: "tile-a" }, author) : null);
+}
+function coversToggle(id, rerender) {
+  const cb = document.getElementById(id);
+  cb.checked = showCovers();
+  cb.onchange = () => { localStorage.setItem("covers", cb.checked ? "1" : "0"); rerender(); };
+}
 function renderAwards() {
   const aws = state.awards, sections = [...new Set(aws.map(a => a.section))];
+  coversToggle("aw-covers", renderAwards);
   document.getElementById("aw-sections").replaceChildren(...sections.map(sec => chip(sec, sec === state.awSection ? "on" : "", () => {
     state.awSection = sec; state.awId = aws.find(a => a.section === sec).id; renderAwards();
   })));
@@ -484,20 +533,28 @@ function renderAwards() {
     const st = awardStats(a);
     return chip(`${a.name} · ${st.read}/${st.total}`, a.id === state.awId ? "on" : "", () => { state.awId = a.id; renderAwards(); });
   }));
-  const aw = aws.find(a => a.id === state.awId), only = document.getElementById("aw-unread").checked;
+  const aw = aws.find(a => a.id === state.awId), only = document.getElementById("aw-unread").checked, covers = showCovers();
   const st = awardStats(aw);
   document.getElementById("aw-count").textContent = `${aw.name} (${aw.country}): ` +
     (aw.by_author ? `читали книги ${st.read} лауреатов из ${st.total}` : `прочитано ${st.read} из ${st.total}`) +
     (aw.nominations.length ? ` · номинация: ${aw.nominations.join(", ")}` : "");
   const rows = [];
-  let year = null;
+  let year = null, grid = null;
   for (const it of [...aw.items].sort((a, b) => (b.y || 0) - (a.y || 0) || b.w - a.w)) {
     const h = awardHit(it);
     if (only && h) continue;
-    if (it.y !== year) { year = it.y; rows.push(el("div", { class: "aw-year" }, year || "без года")); }
+    if (it.y !== year) {
+      year = it.y; rows.push(el("div", { class: "aw-year" }, year || "без года"));
+      if (covers) { grid = el("div", { class: "tiles" }); rows.push(grid); }
+    }
+    const flLink = it.fl ? `https://fantlab.ru/work${it.fl}` : it.aid ? `https://fantlab.ru/autor${it.aid}` : null;
+    if (covers) {
+      grid.append(tile(it.t || it.a, it.t ? it.a : (h && h.n ? `у вас книг: ${h.n}` : ""), it.img, h, flLink));
+      continue;
+    }
     const name = it.t ? `«${it.t}» — ${it.a}` : it.a;
     const link = h && h.b ? el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(h.b); } }, name)
-      : it.fl ? el("a", { href: `https://fantlab.ru/work${it.fl}`, target: "_blank", rel: "noopener" }, name) : name;
+      : flLink ? el("a", { href: flLink, target: "_blank", rel: "noopener" }, name) : name;
     rows.push(el("div", { class: "aw-row" + (h ? " read" : "") },
       el("span", { class: "aw-mark" }, h ? (h.b && h.b.fav ? "❤" : "✓") : "·"), link,
       h && h.n ? el("span", { class: "meta" }, ` — у вас книг: ${h.n}`) : null,
@@ -619,23 +676,35 @@ function renderQuizCard(open) {
       : el("div", { class: "chips" }, chip("Показать ответ", "on", () => renderQuizCard(true)), chip("другой вопрос", "", nextQuiz)));
 }
 function renderQuizRead() {
-  const ix = awardIndex(), qz = state.quiz;
-  const authors = qz.authors.slice(0, 60).map(a => {
-    const n = ix.byAuthor.get(surname(a.name)) || 0;
-    return el("div", { class: "aw-row" + (n ? " read" : "") }, el("span", { class: "aw-mark" }, n ? "✓" : "·"),
-      a.name, el("span", { class: "meta" }, ` — в вопросах ${a.score}` + (n ? `, у вас книг: ${n}` : "")));
-  });
-  const works = qz.works.slice(0, 120).map(w => {
-    const h = awardHit({ t: w.title, a: w.author || "" });
-    const name = `«${w.title}»` + (w.author ? " — " + w.author : "");
-    return el("div", { class: "aw-row" + (h ? " read" : "") }, el("span", { class: "aw-mark" }, h ? (h.b && h.b.fav ? "❤" : "✓") : "·"),
-      h && h.b ? el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(h.b); } }, name) : name,
-      el("span", { class: "meta" }, ` — вопросов: ${w.n}`));
-  });
-  const unread = qz.works.slice(0, 120).filter(w => !awardHit({ t: w.title, a: w.author || "" })).length;
-  document.getElementById("qz-read").replaceChildren(
-    el("p", { class: "hint" }, "Что чаще всего встречается в литературных вопросах «Своей игры», «Эрудиток», «Бескрылок» и тематических турниров. Серым — то, чего нет на полке."),
-    el("h3", {}, `Книги (не прочитано ${unread} из 120)`), ...works,
+  const ix = awardIndex(), qz = state.quiz, box = document.getElementById("qz-read");
+  if (!box.dataset.ready) {
+    box.dataset.ready = "1";
+    box.replaceChildren(
+      el("p", { class: "hint" }, "Что чаще всего встречается в литературных вопросах «Своей игры», «Эрудиток», «Бескрылок» и тематических турниров."),
+      el("label", { class: "aw-only" }, el("input", { type: "checkbox", id: "qz-unread" }), " только непрочитанное"),
+      el("label", { class: "aw-only" }, el("input", { type: "checkbox", id: "qz-covers" }), " обложки"),
+      el("div", { id: "qz-read-list" }));
+    document.getElementById("qz-unread").addEventListener("change", renderQuizRead);
+  }
+  coversToggle("qz-covers", renderQuizRead);
+  const only = document.getElementById("qz-unread").checked, covers = showCovers();
+  const top = qz.works.slice(0, 120).map(w => [w, awardHit({ t: w.title, a: w.author || "", fl: w.fl })]);
+  const works = top.filter(([, h]) => !(only && h));
+  const flLink = w => w.fl ? `https://fantlab.ru/work${w.fl}` : null;
+  const workEls = covers
+    ? [el("div", { class: "tiles" }, ...works.map(([w, h]) => tile(w.title, `${w.author ? w.author + " · " : ""}вопросов: ${w.n}`, w.img, h, flLink(w))))]
+    : works.map(([w, h]) => {
+      const name = `«${w.title}»` + (w.author ? " — " + w.author : "");
+      return el("div", { class: "aw-row" + (h ? " read" : "") }, el("span", { class: "aw-mark" }, h ? (h.b && h.b.fav ? "❤" : "✓") : "·"),
+        h && h.b ? el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(h.b); } }, name)
+          : flLink(w) ? el("a", { href: flLink(w), target: "_blank", rel: "noopener" }, name) : name,
+        el("span", { class: "meta" }, ` — вопросов: ${w.n}`));
+    });
+  const authors = qz.authors.slice(0, 60).map(a => [a, ix.byAuthor.get(surname(a.name)) || 0]).filter(([, n]) => !(only && n))
+    .map(([a, n]) => el("div", { class: "aw-row" + (n ? " read" : "") }, el("span", { class: "aw-mark" }, n ? "✓" : "·"),
+      a.name, el("span", { class: "meta" }, ` — в вопросах ${a.score}` + (n ? `, у вас книг: ${n}` : ""))));
+  document.getElementById("qz-read-list").replaceChildren(
+    el("h3", {}, `Книги (не прочитано ${top.filter(([, h]) => !h).length} из ${top.length})`), ...workEls,
     el("h3", {}, "Авторы"), ...authors);
 }
 document.getElementById("qz-mode-train").addEventListener("click", e => {
@@ -697,9 +766,44 @@ function seriesBlock(b) {
 }
 // ---------- любимое ----------
 function renderFav() {
+  const mode = state.favMode || "books";
+  document.getElementById("fav-modes").replaceChildren(
+    chip("Книги", mode === "books" ? "on" : "", () => { state.favMode = "books"; renderFav(); }),
+    chip("Авторы", mode === "authors" ? "on" : "", () => { state.favMode = "authors"; renderFav(); }));
+  if (mode === "authors") { renderFavAuthors(); return; }
   const favs = state.lib.filter(b => b.fav).sort((a, b) => (a.authors[0] || "").localeCompare(b.authors[0] || "") || a.title.localeCompare(b.title));
   document.getElementById("fav-count").textContent = `Любимых книг: ${favs.length}` + (state.owner ? ". ❤ ставится и снимается в карточке книги." : "");
   renderList("fav-list", favs);
+}
+// Номинации авторов. Общий рейтинг держится на числе любимых книг; сколько прочитано — лишь небольшая
+// прибавка, иначе наверх выходят авторы, которых владелец прочитал почти целиком (Вудхаус, Твен, По).
+function renderFavAuthors() {
+  const by = new Map();
+  for (const b of state.lib) for (const a of b.authors) {
+    if (/коллектив|народн|фольклор|без автора|антология/i.test(a)) continue;
+    if (!by.has(a)) by.set(a, { name: a, read: 0, fav: 0, five: 0, top: 0 });
+    const x = by.get(a);
+    x.read++; x.fav += b.fav ? 1 : 0; x.five += b.rating === 5 ? 1 : 0; x.top += b.shelf === "top" ? 1 : 0;
+  }
+  const all = [...by.values()];
+  for (const x of all) x.score = 2 * x.fav + 2 * x.fav / x.read + 0.5 * Math.log2(x.read + 1) + x.top;
+  const noms = [
+    ["❤ Любимые авторы", "по числу любимых книг, с поправкой на то, сколько прочитано",
+      all.filter(x => x.fav).sort((a, b) => b.score - a.score).slice(0, 25), x => `❤ ${x.fav} из ${x.read}`],
+    ["❤ Больше всего любимых книг", "", all.filter(x => x.fav >= 2).sort((a, b) => b.fav - a.fav || a.read - b.read).slice(0, 15), x => `❤ ${x.fav}`],
+    ["🎯 Самая высокая доля любимого", "от 3 прочитанных книг",
+      all.filter(x => x.read >= 3 && x.fav).sort((a, b) => b.fav / b.read - a.fav / a.read || b.fav - a.fav).slice(0, 12),
+      x => `${Math.round(100 * x.fav / x.read)}% — ❤ ${x.fav} из ${x.read}`],
+    ["⭐ Ни одной осечки", "от 4 книг, и все на пятёрку",
+      all.filter(x => x.read >= 4 && x.five === x.read).sort((a, b) => b.read - a.read).slice(0, 15), x => `${x.read} из ${x.read} на «5»`],
+    ["📚 Больше всего прочитано", "", all.sort((a, b) => b.read - a.read).slice(0, 15), x => `${x.read} книг` + (x.fav ? `, ❤ ${x.fav}` : "")],
+  ];
+  document.getElementById("fav-count").textContent = `Авторов на полке: ${all.length}. Нажмите на автора — покажу его книги.`;
+  document.getElementById("fav-list").replaceChildren(...noms.flatMap(([title, hint, list, fmt]) => [
+    el("h3", {}, title, hint ? el("small", { class: "meta" }, " · " + hint) : null),
+    el("ol", { class: "fav-authors" }, ...list.map(x => el("li", {},
+      el("a", { href: "#", onclick: e => { e.preventDefault(); showSeries(x.name); } }, x.name),
+      el("span", { class: "meta" }, " — " + fmt(x)))))]));
 }
 async function toggleFav(b) {
   if (!localStorage.getItem("owner-key")) {

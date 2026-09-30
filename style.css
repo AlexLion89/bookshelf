@@ -94,3 +94,14 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .qz-q { font-size: 17px; line-height: 1.45; }
 .qz-a { font-size: 16px; }
 .more[hidden], [hidden] { display: none !important; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 12px; margin: 6px 0 10px; }
+.tile { cursor: pointer; font-size: 13px; line-height: 1.25; }
+.tile .tile-img { width: 100%; aspect-ratio: 2 / 3; height: auto; object-fit: cover; border-radius: 6px; background: var(--line); display: block; }
+.tile.read .tile-t { color: var(--plus); }
+.tile-t { margin-top: 4px; font-weight: 600; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.tile-a { color: var(--muted); font-size: 12px; }
+.nocover.tile-img { display: flex; flex-direction: column; justify-content: space-between; padding: 8px; font-size: 11px; box-sizing: border-box; }
+.aw-only { display: inline-block; margin-right: 14px; }
+.fav-authors { margin: 4px 0 12px; padding-left: 1.6em; }
+.fav-authors li { padding: 2px 0; }
+#tab-fav h3 small { font-weight: normal; }
