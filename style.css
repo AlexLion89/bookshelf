@@ -83,3 +83,9 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .all-tools { margin: 8px 2px; font-size: 14px; color: var(--muted); }
 .all-tools select { font: inherit; padding: 4px 6px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
 .more { display: block; margin: 12px auto; padding: 8px 18px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--accent); font: inherit; cursor: pointer; }
+.sg-form { display: flex; flex-direction: column; gap: 8px; max-width: 560px; }
+.sg-form input, .sg-form textarea { font: inherit; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
+.sg-form .more { margin: 4px 0; align-self: flex-start; }
+.sg-picked { font-size: 14px; color: var(--minus); }
+.sg-item { cursor: default; margin-bottom: 8px; }
+.sg-hidden { opacity: 0.45; }

@@ -20,6 +20,7 @@
     <button data-tab="fav">Любимое</button>
     <button data-tab="me" id="me-btn" hidden>Мне почитать</button>
     <button data-tab="awards">Премии</button>
+    <button data-tab="suggest">Предложить книгу</button>
   </nav>
 </header>
 
@@ -83,6 +84,23 @@
     <label class="aw-only"><input type="checkbox" id="aw-unread"> только непрочитанное</label>
     <div id="aw-count" class="count"></div>
     <div id="aw-items"></div>
+  </section>
+
+  <section id="tab-suggest" class="tab">
+    <p class="hint" id="sg-hint">Посоветуйте хозяину полки книгу — он увидит предложение здесь. Начните вводить название: найду на FantLab и проверю, не читал ли уже.</p>
+    <form id="sg-form" class="sg-form" autocomplete="off">
+      <input id="sg-search" type="search" placeholder="Название или автор…">
+      <div id="sg-suggest" class="suggest"></div>
+      <div id="sg-picked" class="sg-picked"></div>
+      <input id="sg-title" placeholder="Название *" maxlength="200">
+      <input id="sg-author" placeholder="Автор" maxlength="120">
+      <textarea id="sg-note" placeholder="Почему стоит прочитать (можно коротко)" maxlength="1000" rows="3"></textarea>
+      <input id="sg-from" placeholder="Как вас зовут *" maxlength="60">
+      <button type="submit" class="more">Отправить</button>
+      <div id="sg-status" class="count"></div>
+    </form>
+    <h3>Уже посоветовали</h3>
+    <div id="sg-list"></div>
   </section>
 
   <section id="tab-me" class="tab">

@@ -59,9 +59,9 @@ const state = { lib: [], vocab: {}, pick: emptyFilter(), like: [] };
 // Правки владельца (❤) и предложения друзей — Cloudflare Worker, исходник в bookshelf-data/worker.
 const API = "https://shelf-api.sirenyov.workers.dev";
 async function api(path, body) {
-  const opt = { signal: AbortSignal.timeout(6000) };
-  if (body) Object.assign(opt, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json",
-    ...(localStorage.getItem("owner-key") ? { Authorization: "Bearer " + localStorage.getItem("owner-key") } : {}) } });
+  const key = localStorage.getItem("owner-key");
+  const opt = { signal: AbortSignal.timeout(6000), headers: key ? { Authorization: "Bearer " + key } : {} };
+  if (body) Object.assign(opt, { method: "POST", body: JSON.stringify(body), headers: { ...opt.headers, "Content-Type": "application/json" } });
   const r = await fetch(API + path, opt);
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(d.error || "ошибка " + r.status), { status: r.status });
@@ -506,6 +506,68 @@ function renderAwards() {
   document.getElementById("aw-items").replaceChildren(...rows);
 }
 
+// ---------- предложения друзей ----------
+function shelfMatch(title, author, fl) {
+  return awardHit({ t: title, a: author || "", fl });
+}
+async function openSuggest() {
+  const box = document.getElementById("sg-list");
+  box.replaceChildren(el("div", { class: "count" }, "Загружаю…"));
+  let list;
+  try { list = await api("/suggest"); } catch { box.replaceChildren(el("div", { class: "count" }, "Список сейчас недоступен.")); return; }
+  list.sort((a, b) => b.date.localeCompare(a.date));
+  box.replaceChildren(...(list.length ? list.map(x => {
+    const h = shelfMatch(x.title, x.author, x.fantlab);
+    const name = x.fantlab ? el("a", { href: `https://fantlab.ru/work${x.fantlab}`, target: "_blank", rel: "noopener" }, x.title) : x.title;
+    return el("div", { class: "book sg-item" + (x.hidden ? " sg-hidden" : "") },
+      el("div", {},
+        el("div", { class: "t" }, name, x.author ? el("span", { class: "a" }, " — " + x.author) : null),
+        el("div", { class: "a" }, `советует ${x.from}, ${x.date.slice(8, 10)}.${x.date.slice(5, 7)}.${x.date.slice(0, 4)}`),
+        x.note ? el("div", { class: "s" }, x.note) : null,
+        h && h.b ? el("div", { class: "why" }, "✓ уже на полке", state.owner ? " " + stars(h.b.rating) : "") : null,
+        state.owner ? el("div", { class: "recbtns" }, chip(x.hidden ? "вернуть" : "скрыть", "", async () => {
+          try { await api("/suggest/hide", { id: x.id, hidden: !x.hidden }); openSuggest(); } catch (e) { alert(e.message); }
+        })) : null));
+  }) : [el("div", { class: "count" }, "Пока никто ничего не посоветовал — будьте первым.")]));
+}
+let sgTimer, sgPicked = null;
+document.getElementById("sg-search").addEventListener("input", e => {
+  const q = e.target.value.trim(), box = document.getElementById("sg-suggest");
+  clearTimeout(sgTimer);
+  if (q.length < 3) { box.replaceChildren(); return; }
+  sgTimer = setTimeout(async () => {
+    try {
+      const d = await flGet("/search-works?q=" + encodeURIComponent(q) + "&page=1");
+      const works = (d.matches || []).filter(m => ["novel", "story", "shortstory", "novella", "cycle", "collection", "epic", "fairy-tale", "documental", "comix"].includes(m.name_eng)).slice(0, 8);
+      box.replaceChildren(...works.map(m => el("div", { onclick: () => {
+        sgPicked = m.work_id;
+        document.getElementById("sg-title").value = m.rusname || m.name;
+        document.getElementById("sg-author").value = m.all_autor_rusname || m.autor_rusname || "";
+        e.target.value = ""; box.replaceChildren();
+        const h = shelfMatch(m.rusname || m.name, m.all_autor_rusname || m.autor_rusname, m.work_id);
+        document.getElementById("sg-picked").textContent = h && h.b ? "Эта книга уже на полке — можно выбрать другую." : "";
+      } }, m.rusname || m.name, " — ", m.all_autor_rusname || m.autor_rusname || "", m.year ? `, ${m.year}` : "")));
+    } catch { box.replaceChildren(el("div", { class: "fl" }, "FantLab сейчас недоступен — впишите название вручную.")); }
+  }, 450);
+});
+document.getElementById("sg-title").addEventListener("input", () => { sgPicked = null; });
+document.getElementById("sg-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const v = id => document.getElementById(id).value.trim();
+  const status = document.getElementById("sg-status");
+  if (!v("sg-title") || !v("sg-from")) { status.textContent = "Нужны название и ваше имя."; return; }
+  status.textContent = "Отправляю…";
+  try {
+    await api("/suggest", { title: v("sg-title"), author: v("sg-author"), note: v("sg-note"), from: v("sg-from"), fantlab: sgPicked });
+    localStorage.setItem("sg-from", v("sg-from"));
+    for (const id of ["sg-title", "sg-author", "sg-note"]) document.getElementById(id).value = "";
+    document.getElementById("sg-picked").textContent = ""; sgPicked = null;
+    status.textContent = "Спасибо! Предложение отправлено.";
+    openSuggest();
+  } catch (err) { status.textContent = "Не отправилось: " + err.message; }
+});
+document.getElementById("sg-from").value = localStorage.getItem("sg-from") || "";
+
 // ---------- циклы ----------
 function seriesLabel(b) {
   const se = b.series;
@@ -614,6 +676,7 @@ document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("cli
   btn.classList.add("active");
   document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
   if (btn.dataset.tab === "awards") openAwards();
+  if (btn.dataset.tab === "suggest") openSuggest();
 }));
 let askTimer;
 document.getElementById("ask").addEventListener("input", e => {
