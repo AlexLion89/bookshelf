@@ -447,9 +447,17 @@ function renderMe() {
   })));
   const show = xs => xs.filter(r => !h[r.fantlab]).map(recEl);
   // Старый me.json без src — всё считается «похожими».
-  const fresh = state.me.fresh.filter(r => (r.src || ["similar"]).some(x => on.has(x))).slice(0, 60);
-  document.getElementById("me-fresh").replaceChildren(...(fresh.length ? show(fresh)
-    : [el("div", { class: "count" }, "Включите хотя бы один источник.")]));
+  const all = state.me.fresh.filter(r => !h[r.fantlab] && (r.src || ["similar"]).some(x => on.has(x)));
+  state.meShown = state.meMore ? state.meShown + 30 : 30;
+  state.meMore = false;
+  document.getElementById("me-fresh").replaceChildren(...(all.length ? show(all.slice(0, state.meShown))
+    : [el("div", { class: "count" }, on.size ? "По этим источникам ничего не осталось." : "Включите хотя бы один источник.")]));
+  document.getElementById("me-found").textContent = all.length
+    ? `Подходит книг: ${all.length}` + (all.length > state.meShown ? ` · показаны первые ${state.meShown}` : "") : "";
+  const more = document.getElementById("me-more");
+  more.hidden = all.length <= state.meShown;
+  more.textContent = `Показать ещё ${Math.max(0, Math.min(30, all.length - state.meShown))}`;
+  more.onclick = () => { state.meMore = true; renderMe(); };
   document.getElementById("me-continue").replaceChildren(...show(state.me.continue));
   const n = Object.keys(h).length;
   document.getElementById("me-count").replaceChildren(
