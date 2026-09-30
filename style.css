@@ -105,3 +105,5 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .fav-authors { margin: 4px 0 12px; padding-left: 1.6em; }
 .fav-authors li { padding: 2px 0; }
 #tab-fav h3 small { font-weight: normal; }
+.nom { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; align-self: start; }
+.nom h3 { margin: 4px 0 2px; }

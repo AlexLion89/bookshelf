@@ -799,11 +799,12 @@ function renderFavAuthors() {
     ["📚 Больше всего прочитано", "", all.sort((a, b) => b.read - a.read).slice(0, 15), x => `${x.read} книг` + (x.fav ? `, ❤ ${x.fav}` : "")],
   ];
   document.getElementById("fav-count").textContent = `Авторов на полке: ${all.length}. Нажмите на автора — покажу его книги.`;
-  document.getElementById("fav-list").replaceChildren(...noms.flatMap(([title, hint, list, fmt]) => [
-    el("h3", {}, title, hint ? el("small", { class: "meta" }, " · " + hint) : null),
+  // Каждая номинация — одна ячейка сетки .list: иначе заголовок и список разъезжаются по разным колонкам.
+  document.getElementById("fav-list").replaceChildren(...noms.map(([title, hint, list, fmt]) => el("div", { class: "nom" },
+    el("h3", {}, title), hint ? el("div", { class: "meta" }, hint) : null,
     el("ol", { class: "fav-authors" }, ...list.map(x => el("li", {},
       el("a", { href: "#", onclick: e => { e.preventDefault(); showSeries(x.name); } }, x.name),
-      el("span", { class: "meta" }, " — " + fmt(x)))))]));
+      el("span", { class: "meta" }, " — " + fmt(x))))))));
 }
 async function toggleFav(b) {
   if (!localStorage.getItem("owner-key")) {
