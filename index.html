@@ -19,6 +19,7 @@
     <button data-tab="all">Все книги</button>
     <button data-tab="fav">Любимое</button>
     <button data-tab="me" id="me-btn" hidden>Мне почитать</button>
+    <button data-tab="awards">Премии</button>
   </nav>
 </header>
 
@@ -55,13 +56,33 @@
 
   <section id="tab-all" class="tab">
     <input id="all-search" type="search" placeholder="Название, автор, тема, рассказ из сборника…" autocomplete="off">
+    <div class="all-tools">
+      <label>Сортировка: <select id="all-sort">
+        <option value="read">сначала недавно прочитанные</option>
+        <option value="read-asc">сначала давно прочитанные</option>
+        <option value="author">по автору</option>
+        <option value="title">по названию</option>
+        <option value="rating">по оценке</option>
+        <option value="year">по году написания</option>
+      </select></label>
+    </div>
     <div id="all-count" class="count"></div>
     <div id="all-list" class="list"></div>
+    <button id="all-more" class="more" hidden>Показать ещё</button>
   </section>
 
   <section id="tab-fav" class="tab">
     <div id="fav-count" class="count"></div>
     <div id="fav-list" class="list"></div>
+  </section>
+
+  <section id="tab-awards" class="tab">
+    <p class="hint">Лауреаты премий и «лучшие книги» по спискам — что из этого на полке. Данные: FantLab.</p>
+    <div id="aw-sections" class="chips"></div>
+    <div id="aw-list" class="chips aw-names"></div>
+    <label class="aw-only"><input type="checkbox" id="aw-unread"> только непрочитанное</label>
+    <div id="aw-count" class="count"></div>
+    <div id="aw-items"></div>
   </section>
 
   <section id="tab-me" class="tab">

@@ -380,11 +380,26 @@ function explain(profile, b) {
 }
 
 // ---------- все книги ----------
-function renderAll() {
+const ALL_PAGE = 60;
+const byStr = f => (a, b) => (f(a) || "").localeCompare(f(b) || "", "ru");
+const ALL_SORT = {
+  read: (a, b) => (b.read || "").localeCompare(a.read || ""),
+  "read-asc": (a, b) => (a.read || "9999").localeCompare(b.read || "9999"),
+  author: byStr(b => { const w = (b.authors[0] || "").trim().split(/\s+/); return w[w.length - 1] + " " + w.join(" ") + " " + b.title; }),
+  title: byStr(b => b.title.replace(/^[«"'(]+/, "")),
+  rating: (a, b) => (b.rating || 0) - (a.rating || 0) || (b.fav ? 1 : 0) - (a.fav ? 1 : 0) || (b.read || "").localeCompare(a.read || ""),
+  year: (a, b) => (a.year || 9999) - (b.year || 9999),
+};
+function renderAll(more) {
   const q = norm(document.getElementById("all-search").value).trim();
-  const res = q ? state.lib.filter(b => q.split(/\s+/).every(w => b._text.includes(w))) : state.lib;
-  document.getElementById("all-count").textContent = `Книг: ${res.length}`;
-  renderList("all-list", res.slice(0, 120), q ? b => matchedContains(b, q) : null);
+  const res = (q ? state.lib.filter(b => q.split(/\s+/).every(w => b._text.includes(w))) : [...state.lib])
+    .sort(ALL_SORT[document.getElementById("all-sort").value]);
+  state.allShown = more === true ? state.allShown + ALL_PAGE : ALL_PAGE;
+  document.getElementById("all-count").textContent = `Книг: ${res.length}` + (res.length > state.allShown ? ` · показаны первые ${state.allShown}` : "");
+  renderList("all-list", res.slice(0, state.allShown), q ? b => matchedContains(b, q) : null);
+  const btn = document.getElementById("all-more");
+  btn.hidden = res.length <= state.allShown;
+  btn.textContent = `Показать ещё ${Math.min(ALL_PAGE, res.length - state.allShown)}`;
 }
 function matchedContains(b, q) {
   const hit = (b.contains || []).find(n => norm(n).includes(q));
@@ -425,6 +440,70 @@ function renderMe() {
   document.getElementById("me-count").replaceChildren(
     `Прочитанных книг-образцов: ${state.me.stats.seeds}, кандидатов: ${state.me.stats.candidates}.`,
     n ? [` Скрыто: ${n} · `, el("a", { href: "#", onclick: e => { e.preventDefault(); localStorage.removeItem("me-hidden"); renderMe(); } }, "вернуть")] : "");
+}
+
+// ---------- премии ----------
+const stem = s => norm(s).replace(/[^а-яa-z0-9 ]+/g, " ").trim();
+const surname = a => { const w = stem(a).split(/\s+/); return (w[w.length - 1] || "").slice(0, 6); };
+function awardIndex() {
+  if (state.awIdx) return state.awIdx;
+  const byFl = new Map(), byName = new Map(), byAuthor = new Map();
+  for (const b of state.lib) {
+    if (b.fantlab) byFl.set(b.fantlab, b);
+    const sn = b.authors.map(surname);
+    const parts = [b.title, b.bm_title, b.orig, ...(b.contains || []), ...b.title.split(/\. /)];
+    for (const t of parts) if (t) for (const s of sn) byName.set(stem(t) + "|" + s, b);
+    for (const s of sn) byAuthor.set(s, (byAuthor.get(s) || 0) + 1);
+  }
+  return (state.awIdx = { byFl, byName, byAuthor });
+}
+function awardHit(it) {
+  const ix = awardIndex(), s = surname(it.a.split(/,| и /)[0]);
+  if (!it.t) return ix.byAuthor.get(s) ? { n: ix.byAuthor.get(s) } : null;
+  const b = (it.fl && ix.byFl.get(it.fl)) || ix.byName.get(stem(it.t) + "|" + s);
+  return b ? { b } : null;
+}
+function awardStats(aw) {
+  const read = aw.items.filter(awardHit).length;
+  return { read, total: aw.items.length };
+}
+async function openAwards() {
+  if (!state.awards) {
+    state.awards = await (await fetch("data/awards.json")).json();
+    state.awSection = state.awards[0].section;
+    state.awId = state.awards[0].id;
+  }
+  renderAwards();
+}
+function renderAwards() {
+  const aws = state.awards, sections = [...new Set(aws.map(a => a.section))];
+  document.getElementById("aw-sections").replaceChildren(...sections.map(sec => chip(sec, sec === state.awSection ? "on" : "", () => {
+    state.awSection = sec; state.awId = aws.find(a => a.section === sec).id; renderAwards();
+  })));
+  document.getElementById("aw-list").replaceChildren(...aws.filter(a => a.section === state.awSection).map(a => {
+    const st = awardStats(a);
+    return chip(`${a.name} · ${st.read}/${st.total}`, a.id === state.awId ? "on" : "", () => { state.awId = a.id; renderAwards(); });
+  }));
+  const aw = aws.find(a => a.id === state.awId), only = document.getElementById("aw-unread").checked;
+  const st = awardStats(aw);
+  document.getElementById("aw-count").textContent = `${aw.name} (${aw.country}): ` +
+    (aw.by_author ? `читали книги ${st.read} лауреатов из ${st.total}` : `прочитано ${st.read} из ${st.total}`) +
+    (aw.nominations.length ? ` · номинация: ${aw.nominations.join(", ")}` : "");
+  const rows = [];
+  let year = null;
+  for (const it of [...aw.items].sort((a, b) => (b.y || 0) - (a.y || 0) || b.w - a.w)) {
+    const h = awardHit(it);
+    if (only && h) continue;
+    if (it.y !== year) { year = it.y; rows.push(el("div", { class: "aw-year" }, year || "без года")); }
+    const name = it.t ? `«${it.t}» — ${it.a}` : it.a;
+    const link = h && h.b ? el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(h.b); } }, name)
+      : it.fl ? el("a", { href: `https://fantlab.ru/work${it.fl}`, target: "_blank", rel: "noopener" }, name) : name;
+    rows.push(el("div", { class: "aw-row" + (h ? " read" : "") },
+      el("span", { class: "aw-mark" }, h ? (h.b && h.b.fav ? "❤" : "✓") : "·"), link,
+      h && h.n ? el("span", { class: "meta" }, ` — у вас книг: ${h.n}`) : null,
+      it.w ? null : el("span", { class: "meta" }, " (номинант)")));
+  }
+  document.getElementById("aw-items").replaceChildren(...rows);
 }
 
 // ---------- циклы ----------
@@ -534,6 +613,7 @@ document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("cli
   document.querySelectorAll("nav button, .tab").forEach(x => x.classList.remove("active"));
   btn.classList.add("active");
   document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+  if (btn.dataset.tab === "awards") openAwards();
 }));
 let askTimer;
 document.getElementById("ask").addEventListener("input", e => {
@@ -543,7 +623,10 @@ document.getElementById("ask").addEventListener("input", e => {
 document.getElementById("reset").addEventListener("click", () => {
   document.getElementById("ask").value = ""; state.pick = emptyFilter(); syncAndRender();
 });
-document.getElementById("all-search").addEventListener("input", renderAll);
+document.getElementById("all-search").addEventListener("input", () => renderAll());
+document.getElementById("all-sort").addEventListener("change", () => renderAll());
+document.getElementById("all-more").addEventListener("click", () => renderAll(true));
+document.getElementById("aw-unread").addEventListener("change", renderAwards);
 let flTimer;
 document.getElementById("like-search").addEventListener("input", e => {
   const q = norm(e.target.value).trim(), box = document.getElementById("like-suggest");
