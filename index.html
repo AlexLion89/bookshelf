@@ -17,6 +17,7 @@
     <button data-tab="pick" class="active">Подобрать</button>
     <button data-tab="like">Похоже на…</button>
     <button data-tab="all">Все книги</button>
+    <button data-tab="me" id="me-btn" hidden>Мне почитать</button>
   </nav>
 </header>
 
@@ -54,6 +55,16 @@
     <input id="all-search" type="search" placeholder="Название, автор, тема, рассказ из сборника…" autocomplete="off">
     <div id="all-count" class="count"></div>
     <div id="all-list" class="list"></div>
+  </section>
+
+  <section id="tab-me" class="tab">
+    <p class="hint" id="me-hint">Непрочитанное, что FantLab считает похожим на ваши пятёрки, отсортировано по близости к вашему вкусу.
+      «Читал» и «Не то» прячут книгу; скажите мне — учту в следующем пересчёте.</p>
+    <div id="me-count" class="count"></div>
+    <h3>Новое</h3>
+    <div id="me-fresh" class="list"></div>
+    <h3>Продолжить начатые циклы</h3>
+    <div id="me-continue" class="list"></div>
   </section>
 </main>
 

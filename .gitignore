@@ -1,2 +1,2 @@
-data/library.private.json
+data/*.private.json
 test.html

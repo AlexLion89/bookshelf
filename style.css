@@ -68,3 +68,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .nocover .nca { opacity: .85; }
 .tgroup { margin: 4px 0; } .tgroup summary { cursor: pointer; font-size: 14px; color: var(--muted); padding: 2px 0; }
 .tgroup .chips { margin: 4px 0 8px; }
+.book.rec { cursor: default; }
+.book.rec .t a { color: inherit; }
+.recbtns { margin-top: 6px; display: flex; gap: 6px; }
+.recbtns .chip { font-size: 12px; padding: 2px 8px; }
+#tab-me h3 { margin: 18px 2px 6px; }

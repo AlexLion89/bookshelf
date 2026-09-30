@@ -86,6 +86,19 @@ async function load() {
     const r = await fetch("data/library.private.json").catch(() => null);
     if (r && r.ok) { state.lib = await r.json(); document.getElementById("owner-badge").hidden = false; }
   }
+  state.owner = owner;
+  const m = await fetch("data/me.json").catch(() => null);
+  if (m && m.ok) {
+    state.me = await m.json();
+    const btn = document.getElementById("me-btn");
+    btn.hidden = false;
+    if (!owner) {
+      btn.textContent = "Что почитать хозяину";
+      document.getElementById("me-hint").textContent = "Чего хозяин полки ещё не читал, но, судя по его пятёркам, должно понравиться. " +
+        "Если хотите подарить книгу — начните отсюда.";
+    }
+    renderMe();
+  }
   if (!state.lib.length) state.lib = await (await fetch(url)).json();
   for (const b of state.lib) {
     b._text = norm([b.title, b.bm_title, ...b.authors, b.orig, ...b.themes, ...(b.tags || []), ...b.genres, ...(b.contains || []),
@@ -355,6 +368,42 @@ function renderAll() {
 function matchedContains(b, q) {
   const hit = (b.contains || []).find(n => norm(n).includes(q));
   return hit && !norm(b.title).includes(q) ? "Внутри: «" + hit + "»" : "";
+}
+
+// ---------- мне почитать (только режим владельца) ----------
+const hidden = () => JSON.parse(localStorage.getItem("me-hidden") || "{}");
+function hideRec(r, why) {
+  const h = hidden();
+  h[r.fantlab] = { why, title: r.title };
+  localStorage.setItem("me-hidden", JSON.stringify(h));
+  renderMe();
+}
+function recEl(r) {
+  const fl = `https://fantlab.ru/work${r.fantlab}`;
+  const note = r.continues ? `Цикл «${r.continues}» у вас начат` : r.start ? `Цикл «${r.cycle}» — начать с «${r.start}»` : "";
+  return el("div", { class: "book rec" },
+    r.image ? el("img", { src: r.image, alt: "", loading: "lazy", referrerpolicy: "no-referrer" })
+            : coverEl({ title: r.title, authors: r.authors }, "thumb"),
+    el("div", {},
+      el("div", { class: "t" }, el("a", { href: fl, target: "_blank", rel: "noopener" }, r.title)),
+      el("div", { class: "a" }, r.authors.join(", "), r.year ? `, ${r.year}` : "", r.type ? ` · ${r.type}` : "",
+        r.fl_rating ? ` · FantLab ${r.fl_rating} (${r.fl_voters})` : ""),
+      note ? el("div", { class: "ser" }, "📚 ", note) : null,
+      el("div", { class: "s" }, r.description),
+      el("div", { class: "why" }, r.why || ("Советуют: " + r.seeds.slice(0, 3).join(", ") +
+        (r.near.length ? ". Близко к: " + r.near.slice(0, 3).join(", ") : ""))),
+      state.owner ? el("div", { class: "recbtns" },
+        chip("✓ читал", "", () => hideRec(r, "читал")), chip("✕ не то", "", () => hideRec(r, "не то"))) : null));
+}
+function renderMe() {
+  const h = state.owner ? hidden() : {};
+  const show = xs => xs.filter(r => !h[r.fantlab]).map(recEl);
+  document.getElementById("me-fresh").replaceChildren(...show(state.me.fresh));
+  document.getElementById("me-continue").replaceChildren(...show(state.me.continue));
+  const n = Object.keys(h).length;
+  document.getElementById("me-count").replaceChildren(
+    `Прочитанных книг-образцов: ${state.me.stats.seeds}, кандидатов: ${state.me.stats.candidates}.`,
+    n ? [` Скрыто: ${n} · `, el("a", { href: "#", onclick: e => { e.preventDefault(); localStorage.removeItem("me-hidden"); renderMe(); } }, "вернуть")] : "");
 }
 
 // ---------- циклы ----------
