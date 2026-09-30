@@ -17,6 +17,7 @@
     <button data-tab="pick" class="active">Подобрать</button>
     <button data-tab="like">Похоже на…</button>
     <button data-tab="all">Все книги</button>
+    <button data-tab="fav">Любимое</button>
     <button data-tab="me" id="me-btn" hidden>Мне почитать</button>
   </nav>
 </header>
@@ -56,6 +57,11 @@
     <input id="all-search" type="search" placeholder="Название, автор, тема, рассказ из сборника…" autocomplete="off">
     <div id="all-count" class="count"></div>
     <div id="all-list" class="list"></div>
+  </section>
+
+  <section id="tab-fav" class="tab">
+    <div id="fav-count" class="count"></div>
+    <div id="fav-list" class="list"></div>
   </section>
 
   <section id="tab-me" class="tab">

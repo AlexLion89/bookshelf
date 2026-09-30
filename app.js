@@ -56,6 +56,17 @@ const THEME_SYNONYMS = [
 ];
 
 const state = { lib: [], vocab: {}, pick: emptyFilter(), like: [] };
+// Правки владельца (❤) и предложения друзей — Cloudflare Worker, исходник в bookshelf-data/worker.
+const API = "https://shelf-api.sirenyov.workers.dev";
+async function api(path, body) {
+  const opt = { signal: AbortSignal.timeout(6000) };
+  if (body) Object.assign(opt, { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "application/json",
+    ...(localStorage.getItem("owner-key") ? { Authorization: "Bearer " + localStorage.getItem("owner-key") } : {}) } });
+  const r = await fetch(API + path, opt);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(d.error || "ошибка " + r.status), { status: r.status });
+  return d;
+}
 
 // Слово ищется с начала слова: основа «кот» не должна находить «который».
 const wordRe = new Map();
@@ -111,11 +122,17 @@ async function load() {
     return [...c.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
   };
   state.vocab = { genres: count("genres"), places: count("places"), regions: count("regions"), eras: count("eras"), themes: count("themes") };
+  try {
+    const fav = await api("/fav");
+    const on = new Set(fav.on), off = new Set(fav.off);
+    for (const b of state.lib) if (on.has(b.id)) b.fav = true; else if (off.has(b.id)) b.fav = false;
+  } catch { /* без API — любимое как при сборке */ }
   const t = await fetch("data/themes.json").catch(() => null);
   state.themeGroups = t && t.ok ? await t.json() : {};
   buildFilters();
   renderPick();
   renderAll();
+  renderFav();
 }
 
 // ---------- фильтры ----------
@@ -458,6 +475,28 @@ function seriesBlock(b) {
     books.length > 1 ? el("ol", {}, ...books.map(x => el("li", { class: x.id === b.id ? "cur" : "", value: x.series.n || undefined },
       x.id === b.id ? x.title : el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(x); } }, x.title)))) : null);
 }
+// ---------- любимое ----------
+function renderFav() {
+  const favs = state.lib.filter(b => b.fav).sort((a, b) => (a.authors[0] || "").localeCompare(b.authors[0] || "") || a.title.localeCompare(b.title));
+  document.getElementById("fav-count").textContent = `Любимых книг: ${favs.length}` + (state.owner ? ". ❤ ставится и снимается в карточке книги." : "");
+  renderList("fav-list", favs);
+}
+async function toggleFav(b) {
+  if (!localStorage.getItem("owner-key")) {
+    const k = prompt("Пароль владельца (запомнится в этом браузере):");
+    if (!k) return;
+    localStorage.setItem("owner-key", k);
+  }
+  try {
+    await api("/fav", { id: b.id, on: !b.fav });
+    b.fav = !b.fav;
+    renderFav(); renderPick(); openCard(b);
+  } catch (e) {
+    if (e.status === 401) localStorage.removeItem("owner-key");
+    alert("Не сохранилось: " + e.message);
+  }
+}
+
 function openCard(b) {
   const w = b.warnings, warn = [];
   if (w.animal_cruelty !== "нет") warn.push("жестокость к животным: " + w.animal_cruelty);
@@ -475,7 +514,8 @@ function openCard(b) {
         el("div", { class: "meta" }, [b.form, b.length].join(" · ")),
         el("div", { class: "stars" }, stars(b.rating)),
         b.shelf === "top" ? el("div", { class: "meta" }, "🏆 в топе владельца") : null,
-        b.fav ? el("div", { class: "meta" }, "❤ любимое владельца") : null)),
+        state.owner ? el("button", { class: "chip " + (b.fav ? "on" : ""), onclick: () => toggleFav(b) }, b.fav ? "❤ любимое — убрать" : "♡ в любимое")
+          : b.fav ? el("div", { class: "meta" }, "❤ любимое владельца") : null)),
     el("p", {}, el("b", {}, b.summary)),
     el("p", {}, el("i", {}, b.why)),
     el("div", { class: "chips" }, ...b.genres.map(g => chip(g, "on")), ...b.themes.map(t => chip(t))),
