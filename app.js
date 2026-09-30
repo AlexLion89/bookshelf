@@ -426,19 +426,35 @@ function recEl(r) {
         r.fl_rating ? ` · FantLab ${r.fl_rating} (${r.fl_voters})` : ""),
       note ? el("div", { class: "ser" }, "📚 ", note) : null,
       el("div", { class: "s" }, r.description),
-      el("div", { class: "why" }, r.why || ("Советуют: " + r.seeds.slice(0, 3).join(", ") +
+      (r.awards || []).length || r.quiz_n ? el("div", { class: "ser" },
+        ...(r.awards || []).slice(0, 3).map(x => "🏆 " + x + "  "), r.quiz_n ? `❓ в квизах: ${r.quiz_n}` : "") : null,
+      el("div", { class: "why" }, r.why || r.why_auto || ("Советуют: " + r.seeds.slice(0, 3).join(", ") +
         (r.near.length ? ". Близко к: " + r.near.slice(0, 3).join(", ") : ""))),
       state.owner ? el("div", { class: "recbtns" },
         chip("✓ читал", "", () => hideRec(r, "читал")), chip("✕ не то", "", () => hideRec(r, "не то"))) : null));
 }
+const ME_SRC = { similar: "📖 похожие на прочитанное", awards: "🏆 премии и списки лучших", quiz: "❓ частые в квизах" };
+function meSources() {
+  const saved = JSON.parse(localStorage.getItem("me-src") || "null");
+  return new Set(saved || Object.keys(ME_SRC));
+}
 function renderMe() {
-  const h = state.owner ? hidden() : {};
+  const h = state.owner ? hidden() : {}, on = meSources();
+  document.getElementById("me-src").replaceChildren(...Object.entries(ME_SRC).map(([k, label]) => chip(label, on.has(k) ? "on" : "", () => {
+    on.has(k) ? on.delete(k) : on.add(k);
+    localStorage.setItem("me-src", JSON.stringify([...on]));
+    renderMe();
+  })));
   const show = xs => xs.filter(r => !h[r.fantlab]).map(recEl);
-  document.getElementById("me-fresh").replaceChildren(...show(state.me.fresh));
+  // Старый me.json без src — всё считается «похожими».
+  const fresh = state.me.fresh.filter(r => (r.src || ["similar"]).some(x => on.has(x))).slice(0, 60);
+  document.getElementById("me-fresh").replaceChildren(...(fresh.length ? show(fresh)
+    : [el("div", { class: "count" }, "Включите хотя бы один источник.")]));
   document.getElementById("me-continue").replaceChildren(...show(state.me.continue));
   const n = Object.keys(h).length;
   document.getElementById("me-count").replaceChildren(
-    `Прочитанных книг-образцов: ${state.me.stats.seeds}, кандидатов: ${state.me.stats.candidates}.`,
+    `Похожие — по ${state.me.stats.seeds} прочитанным книгам` +
+      (state.me.stats.awards ? `, непрочитанных лауреатов и книг из списков: ${state.me.stats.awards}, частых в квизах: ${state.me.stats.quiz}.` : "."),
     n ? [` Скрыто: ${n} · `, el("a", { href: "#", onclick: e => { e.preventDefault(); localStorage.removeItem("me-hidden"); renderMe(); } }, "вернуть")] : "");
 }
 
@@ -452,7 +468,7 @@ const NUMS = { один: 1, два: 2, три: 3, четыре: 4, пять: 5, 
   одиннадцать: 11, двенадцать: 12, тринадцать: 13, пятнадцать: 15, двадцать: 20, тридцать: 30, сорок: 40,
   пятьдесят: 50, сто: 100, тысяча: 1000 };
 const STOPW = new Set(["в", "во", "и", "на", "не", "с", "со", "о", "об", "по", "к", "из", "за", "от", "для", "или", "а", "the", "a", "of", "and"]);
-const toks = s => new Set(stem(s).split(/\s+/).filter(w => w && !STOPW.has(w)).map(w => String(NUMS[w] ?? w).slice(0, 5)));
+const toks = (s, n = 5) => new Set(stem(s).split(/\s+/).filter(w => w && !STOPW.has(w)).map(w => String(NUMS[w] ?? w).slice(0, n)));
 function titleLike(q, b, strict) {
   let inter = 0;
   for (const w of q) if (b.has(w)) inter++;
@@ -468,7 +484,8 @@ function awardIndex() {
     if (b.fantlab) byFl.set(b.fantlab, b);
     const sn = b.authors.map(surname);
     const parts = [b.title, b.bm_title, b.orig, ...(b.contains || []), ...b.title.split(/\. /)].filter(Boolean);
-    b._tk = parts.map(toks);
+    b._tk = parts.map(t => toks(t));
+    b._tkf = parts.map(t => toks(t, 99));
     for (const t of parts) { titles.add(stem(t)); for (const s of sn) byName.set(stem(t) + "|" + s, b); }
     for (const s of sn) { byAuthor.set(s, (byAuthor.get(s) || 0) + 1); if (!bySur.has(s)) bySur.set(s, []); bySur.get(s).push(b); }
     for (const tk of b._tk) for (const w of tk) { if (!byTok.has(w)) byTok.set(w, new Set()); byTok.get(w).add(b); }
@@ -484,9 +501,11 @@ function awardHit(it) {
   const q = toks(it.t);
   if (!b && q.size) b = (ix.bySur.get(s) || []).find(x => x._tk.some(t => titleLike(q, t, false)));
   // Автор у книг из квизов угадан по соседству в тексте вопроса — длинному названию верим и без него.
+  // Без автора сравниваем полные слова: по первым пяти буквам «Маленькая принцесса» = «Маленький принц».
   if (!b && q.size >= 2) {
+    const qf = toks(it.t, 99);
     const rare = [...q].map(w => ix.byTok.get(w) || new Set()).sort((x, y) => x.size - y.size)[0];
-    b = [...rare].find(x => x._tk.some(t => titleLike(q, t, true)));
+    b = [...rare].find(x => x._tkf.some(t => titleLike(qf, t, true)));
   }
   const res = b ? { b } : null;
   ix.memo.set(key, res);
