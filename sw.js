@@ -1,6 +1,6 @@
 // Всё — сначала из сети, чтобы обновления сайта и новые книги появлялись сразу; без сети —
 // последняя сохранённая копия. Кэш-первым тут нельзя: владелец не станет чистить кэш вручную.
-const CACHE = "bookshelf-v10";
+const CACHE = "bookshelf-v11";
 const SHELL = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icon.svg", "icon-192.png"];
 
 self.addEventListener("install", e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())));
