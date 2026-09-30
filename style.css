@@ -93,3 +93,4 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .qz-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin: 8px 0; }
 .qz-q { font-size: 17px; line-height: 1.45; }
 .qz-a { font-size: 16px; }
+.more[hidden], [hidden] { display: none !important; }

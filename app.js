@@ -399,7 +399,7 @@ function renderAll(more) {
   renderList("all-list", res.slice(0, state.allShown), q ? b => matchedContains(b, q) : null);
   const btn = document.getElementById("all-more");
   btn.hidden = res.length <= state.allShown;
-  btn.textContent = `Показать ещё ${Math.min(ALL_PAGE, res.length - state.allShown)}`;
+  btn.textContent = `Показать ещё ${Math.max(0, Math.min(ALL_PAGE, res.length - state.allShown))}`;
 }
 function matchedContains(b, q) {
   const hit = (b.contains || []).find(n => norm(n).includes(q));
