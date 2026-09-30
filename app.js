@@ -14,6 +14,7 @@ const LENGTH = ["короткая", "средняя", "кирпич"];
 
 // Фраза «что хочется почитать» → фильтры. Порядок важен: «без …» проверяется раньше «…».
 const PHRASES = [
+  [/любим/, f => { f.fav = true; }],
   [/без (жестокост[а-яё]* к )?животн|животн[а-яё]* не (мучают|страдают)|не мучают животн/, f => { f.warn.add("animal_cruelty"); }],
   [/(без|не) (гибел|умира|погиба)[а-яё]* животн|животн[а-яё]* не (умира|погиба)/, f => { f.warn.add("animal_death"); }],
   [/без (насилия над )?детьми|без насилия над дет/, f => { f.warn.add("child_abuse"); }],
@@ -65,7 +66,7 @@ function hit(b, wd) {
 
 function emptyFilter() {
   return { genres: new Set(), scales: {}, warn: new Set(), audience: new Set(), length: new Set(),
-           places: new Set(), eras: new Set(), themes: new Set(), words: [] };
+           places: new Set(), eras: new Set(), themes: new Set(), words: [], fav: false };
 }
 
 const norm = s => (s || "").toLowerCase().replace(/ё/g, "е");
@@ -131,6 +132,7 @@ function buildFilters() {
   fill("f-warn", Object.keys(WARN), k => chip("без: " + WARN[k], f.warn.has(k) ? "on warn" : "", toggleSet(f.warn, k)));
   fill("f-aud", AUDIENCE, v => chip(v, f.audience.has(v) ? "on" : "", toggleSet(f.audience, v)));
   fill("f-len", LENGTH, v => chip(v, f.length.has(v) ? "on" : "", toggleSet(f.length, v)));
+  fill("f-fav", ["❤ только любимое владельца"], v => chip(v, f.fav ? "on" : "", () => { f.fav = !f.fav; syncAndRender(); }));
   fill("f-places", state.vocab.regions, v => chip(v, f.places.has(v) ? "on" : "", toggleSet(f.places, v)));
   fill("f-eras", state.vocab.eras, v => chip(v, f.eras.has(v) ? "on" : "", toggleSet(f.eras, v)));
   // Темы — по разделам словаря, внутри раздела самые частые первыми.
@@ -176,6 +178,7 @@ function renderUnderstood() {
   f.genres.forEach(g => parts.push(chip(g, "on")));
   for (const [k, v] of Object.entries(f.scales)) parts.push(chip(SCALES[k], v > 0 ? "plus" : "minus"));
   f.warn.forEach(k => parts.push(chip("без: " + WARN[k], "on warn")));
+  if (f.fav) parts.push(chip("❤ любимое", "on"));
   [...f.audience, ...f.length, ...f.places, ...f.eras, ...f.themes].forEach(v => parts.push(chip(v, "on")));
   if (f.words.length) parts.push(chip("темы: " + f.words.map(w => w.replace(/\(.*$/, "") + "…").join(" / "), "on"));
   const box = document.getElementById("understood");
@@ -194,6 +197,7 @@ function checks(b, f) {
   for (const k of ["child_abuse", "suicide", "profanity"]) if (f.warn.has(k)) out.push(!w[k]);
   if (f.audience.size) out.push(b.audience.some(a => f.audience.has(a)));
   if (f.length.size) out.push(f.length.has(b.length));
+  if (f.fav) out.push(!!b.fav);
   if (f.places.size) out.push(b.places.some(p => f.places.has(p)) || b.regions.some(r => f.places.has(r)));
   if (f.eras.size) out.push(b.eras.some(e => f.eras.has(e)));
   if (f.themes.size) out.push(b.themes.some(t => f.themes.has(t)));
@@ -202,7 +206,7 @@ function checks(b, f) {
 }
 
 function pickScore(b, f) {
-  let s = (b.rating || 4) + (b.shelf === "top" ? 2 : 0) + b.confidence;
+  let s = (b.rating || 4) + (b.shelf === "top" ? 2 : 0) + (b.fav ? 2 : 0) + b.confidence;
   for (const wd of f.words) if (hit(b, wd)) s += 1.5;
   for (const [k, v] of Object.entries(f.scales)) s += v > 0 ? b.scales[k] : -b.scales[k];
   return s;
@@ -331,7 +335,7 @@ function renderLike() {
   const chosenIds = new Set(state.like.filter(x => !x.ext).map(x => x.book.id));
   const sim = new Set(state.like.flatMap(x => [...x.similars]));
   const res = state.lib.filter(b => !chosenIds.has(b.id)).map(b => {
-    let s = cos(profile, vec(b)) + (b.rating === 5 ? 0.03 : 0) + (b.shelf === "top" ? 0.05 : 0);
+    let s = cos(profile, vec(b)) + (b.rating === 5 ? 0.03 : 0) + (b.shelf === "top" ? 0.05 : 0) + (b.fav ? 0.05 : 0);
     if (b.fantlab && sim.has(b.fantlab)) s += 0.3;
     if (b.series && series.has(b.series.name)) s -= 0.15;
     return [s, b];
@@ -440,7 +444,7 @@ function renderList(id, books, extra) {
     coverEl(b, "thumb"),
     el("div", {},
       el("div", { class: "t" }, b.title),
-      el("div", { class: "a" }, b.authors.join(", "), " ", el("span", { class: "stars" }, stars(b.rating))),
+      el("div", { class: "a" }, b.authors.join(", "), " ", el("span", { class: "stars" }, stars(b.rating)), b.fav ? " ❤" : ""),
       b.series ? el("div", { class: "ser" }, "📚 ", seriesLabel(b)) : null,
       el("div", { class: "s" }, b.summary),
       extra ? el("div", { class: "why" }, extra(b)) : el("div", { class: "why" }, b.why)))));
@@ -470,7 +474,8 @@ function openCard(b) {
         el("div", { class: "meta" }, b.authors.join(", "), b.orig ? ` · ${b.orig}` : "", b.year ? ` · ${b.year}` : ""),
         el("div", { class: "meta" }, [b.form, b.length].join(" · ")),
         el("div", { class: "stars" }, stars(b.rating)),
-        b.shelf === "top" ? el("div", { class: "meta" }, "🏆 в топе владельца") : null)),
+        b.shelf === "top" ? el("div", { class: "meta" }, "🏆 в топе владельца") : null,
+        b.fav ? el("div", { class: "meta" }, "❤ любимое владельца") : null)),
     el("p", {}, el("b", {}, b.summary)),
     el("p", {}, el("i", {}, b.why)),
     el("div", { class: "chips" }, ...b.genres.map(g => chip(g, "on")), ...b.themes.map(t => chip(t))),
