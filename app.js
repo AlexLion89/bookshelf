@@ -553,6 +553,14 @@ function markRec(r, v) {
   renderMe();
   enqueue("/me", body, "me:" + r.fantlab);
 }
+// Дочитал: полка и оценки живут на BookMix — открыть там поиск книги, чтобы сразу поставить оценку, а здесь
+// отметить «читал». В понедельник автообновление привезёт книгу на полку уже с оценкой.
+function finishRec(r) {
+  const q = [r.title, (r.authors || [])[0] && r.authors[0].split(/\s+/).pop()].filter(Boolean).join(" ");
+  window.open("https://bookmix.ru/booksearch/?keyword=" + encodeURIComponent(q), "_blank", "noopener");
+  markRec(r, "читал");
+  toast("Поставьте оценку на BookMix — в понедельник книга приедет на полку");
+}
 function recEl(r) {
   const fl = `https://fantlab.ru/work${r.fantlab}`, mark = state.marks[r.fantlab];
   const note = r.continues ? `Цикл «${r.continues}» у вас начат` : r.start ? `Цикл «${r.cycle}» — начать с «${r.start}»` : "";
@@ -570,8 +578,10 @@ function recEl(r) {
       ...(r.friends || []).filter(f => f.note).map(f => el("div", { class: "friend" }, "💬 ", el("b", {}, f.from), ": ", f.note)),
       el("div", { class: "why" }, r.why || r.why_auto || ((r.seeds || []).length ? "Советуют: " + r.seeds.slice(0, 3).join(", ") +
         ((r.near || []).length ? ". Близко к: " + r.near.slice(0, 3).join(", ") : "") : "")),
-      state.owner ? el("div", { class: "recbtns" }, ...Object.entries(MARK_BTN).map(([v, [off, on]]) =>
-        chip(mark && mark.v === v ? on : off, mark && mark.v === v ? "on" : "", () => markRec(r, v)))) : null));
+      state.owner ? el("div", { class: "recbtns" },
+        mark && mark.v === "читаю" ? chip("✓ дочитал → оценить на BookMix", "plus", () => finishRec(r)) : null,
+        ...Object.entries(MARK_BTN).map(([v, [off, on]]) =>
+          chip(mark && mark.v === v ? on : off, mark && mark.v === v ? "on" : "", () => markRec(r, v)))) : null));
 }
 const ME_SRC = { similar: "📖 похожие на прочитанное", awards: "🏆 премии и списки лучших", quiz: "❓ частые в квизах", friends: "💬 советуют друзья" };
 function meSources() {
