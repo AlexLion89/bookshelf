@@ -34,6 +34,7 @@
 
 <main>
   <section id="tab-pick" class="tab active">
+    <div id="now-reading" class="now-reading" hidden></div>
     <div class="ask">
       <input id="ask" type="search" placeholder="Что хочется почитать? Например: смешное фэнтези, коротко, без жестокости к животным" autocomplete="off">
     </div>
@@ -131,6 +132,12 @@
       «★ в план» откладывает книгу наверх, «✓ читал» и «✕ не то» прячут её. Отметки хранятся на сервере — видны с любого устройства и учитываются при пересчёте.</p>
     <div id="me-src" class="chips"></div>
     <div id="me-count" class="count"></div>
+    <div id="me-add" class="me-add" hidden>
+      <input id="me-add-search" type="search" placeholder="Отметить другую книгу: «читаю» или «в план» — название или автор…" autocomplete="off">
+      <div id="me-add-suggest" class="suggest"></div>
+    </div>
+    <h3 id="me-reading-h" hidden>Сейчас читаю</h3>
+    <div id="me-reading" class="list"></div>
     <h3 id="me-plan-h" hidden>В планах</h3>
     <div id="me-plan" class="list"></div>
     <h3>Новое</h3>

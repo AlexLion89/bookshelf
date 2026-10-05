@@ -74,7 +74,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .tgroup .chips { margin: 4px 0 8px; }
 .book.rec { cursor: default; }
 .book.rec .t a { color: inherit; }
-.recbtns { margin-top: 6px; display: flex; gap: 6px; }
+.recbtns { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
 .recbtns .chip { font-size: 12px; padding: 2px 8px; }
 #tab-me h3 { margin: 18px 2px 6px; }
 .aw-names { margin-top: 8px; }
@@ -166,3 +166,22 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .heat td { width: 26px; height: 22px; border-radius: 3px; outline: none; }
 .heat td:hover, .heat td:focus-visible { box-shadow: 0 0 0 2px var(--fg); }
 .pending { border: 1px solid var(--line); background: var(--warn); color: var(--fg); border-radius: 999px; padding: 1px 9px; font: inherit; font-size: 12px; font-weight: normal; cursor: pointer; vertical-align: 2px; }
+
+/* сейчас читаю */
+.now-reading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 0 0 12px; padding: 8px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; font-size: 14px; }
+.nr-h { color: var(--muted); }
+.nr-book { display: flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; }
+.nr-book img, .nr-book .nr-cover { width: 28px; height: 42px; object-fit: cover; border-radius: 3px; flex: none; }
+.nocover.nr-cover { padding: 2px; font-size: 5px; }
+.me-add { margin: 10px 0 4px; }
+.me-add-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; cursor: default !important; }
+.me-add-row .recbtns { margin: 0; }
+#tab-me h3#me-reading-h { margin-top: 14px; }
+/* итоги года */
+.st-nav { margin: 4px 0 12px; }
+.review-hero { text-align: center; padding: 22px 16px; }
+.hero-v { font-size: 52px; font-weight: 600; line-height: 1.1; }
+.hero-s { color: var(--muted); margin-top: 4px; }
+.review-mood { font-family: Georgia, "Times New Roman", serif; font-style: italic; font-size: 17px; margin: 14px auto 6px; max-width: 620px; }
+.review-list { margin: 6px 0 0; padding-left: 1.2em; } .review-list li { padding: 2px 0; }
+.review-author { margin: 8px 0 2px; font-size: 17px; }

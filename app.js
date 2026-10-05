@@ -106,6 +106,7 @@ async function flush() {
   try {
     while ((x = pending()[0])) {
       await api(x.path, x.body);
+      if (x.path === "/quiz") qzMerge(x.body.items);
       // Пока запрос шёл, ту же книгу могли нажать снова — тогда в очереди уже новая запись, её не трогаем.
       savePending(pending().filter(y => !(y.key === x.key && JSON.stringify(y.body) === JSON.stringify(x.body))));
     }
@@ -136,7 +137,7 @@ function paintPending() {
 async function refreshFromServer() {
   const [m, fav] = await Promise.all([api("/me").catch(() => null), api("/fav").catch(() => null)]);
   state.synced = !!(m && fav);
-  if (m) { setMarks(m); if (state.me) renderMe(); }
+  if (m) { setMarks(m); if (state.me) renderMe(); else renderNowReading(); }
   if (fav) {
     const on = new Set(fav.on), off = new Set(fav.off);
     for (const x of pending()) if (x.path === "/fav") { on.delete(x.body.id); off.delete(x.body.id); (x.body.on ? on : off).add(x.body.id); }
@@ -522,7 +523,8 @@ function matchedContains(b, q) {
 // ---------- мне почитать ----------
 // Отметки владельца («план», «читал», «не то») живут в Worker и видны с любого устройства; сборка
 // (recommend_me.py) забирает их оттуда. Старые отметки из этого браузера переносятся туда один раз.
-const MARK_BTN = { "план": ["★ в план", "★ в плане"], "читал": ["✓ читал", "✓ читал"], "не то": ["✕ не то", "✕ не то"] };
+const MARK_BTN = { "план": ["★ в план", "★ в плане"], "читаю": ["📖 читаю", "📖 читаю"], "читал": ["✓ читал", "✓ читал"], "не то": ["✕ не то", "✕ не то"] };
+const KEEP = ["план", "читаю"];   // эти отметки не прячут книгу, а поднимают её наверх
 const localHidden = () => JSON.parse(localStorage.getItem("me-hidden") || "{}");
 const today = () => new Date().toISOString().slice(0, 10);
 function setMarks(server) {
@@ -578,15 +580,51 @@ function meSources() {
   const seen = JSON.parse(localStorage.getItem("me-src-seen") || '["similar","awards","quiz"]');
   return new Set(saved ? [...saved, ...Object.keys(ME_SRC).filter(k => !seen.includes(k))] : Object.keys(ME_SRC));
 }
-// План: карточка из me.json, если она там есть, иначе — то, что сохранено вместе с отметкой.
-function planRecs() {
-  const all = new Map([...state.me.fresh, ...state.me.continue, ...(state.me.plan || [])].map(r => [r.fantlab, r]));
-  return Object.entries(state.marks).filter(([, m]) => m.v === "план")
+// План и «читаю»: карточка из me.json, если она там есть, иначе — то, что сохранено вместе с отметкой.
+// Книга, появившаяся на полке (прочитана и записана на BookMix), из этих списков уходит сама.
+function markedRecs(v) {
+  const me = state.me || { fresh: [], continue: [] };
+  const all = new Map([...me.fresh, ...me.continue, ...(me.plan || [])].map(r => [r.fantlab, r]));
+  return Object.entries(state.marks).filter(([, m]) => m.v === v)
     .sort((a, b) => (b[1].date || "").localeCompare(a[1].date || ""))
     .map(([id, m]) => all.get(+id) || { fantlab: +id, title: m.title, authors: m.authors || [], image: m.image,
       why_auto: m.from ? `Советует ${m.from}.` : null })
     .filter(r => { const h = shelfMatch(r.title, r.authors[0], r.fantlab); return !(h && h.b); });
 }
+// «Сейчас читаю» — полоской над подбором, её видят и гости.
+function renderNowReading() {
+  const box = document.getElementById("now-reading"), rs = markedRecs("читаю");
+  box.hidden = !rs.length;
+  box.replaceChildren(el("span", { class: "nr-h" }, state.owner ? "📖 Сейчас читаю:" : "📖 Хозяин сейчас читает:"),
+    ...rs.map(r => el("a", { class: "nr-book", href: `https://fantlab.ru/work${r.fantlab}`, target: "_blank", rel: "noopener" },
+      r.image ? el("img", { src: r.image, alt: "", referrerpolicy: "no-referrer" }) : coverEl({ title: r.title, authors: r.authors }, "nr-cover"),
+      el("span", {}, el("b", {}, r.title), (r.authors || []).length ? el("span", { class: "meta" }, " — " + r.authors.join(", ")) : null))));
+}
+// Отметить книгу, которой нет в рекомендациях: поиск по FantLab.
+let meAddTimer;
+document.getElementById("me-add-search").addEventListener("input", e => {
+  const q = e.target.value.trim(), box = document.getElementById("me-add-suggest");
+  clearTimeout(meAddTimer);
+  if (q.length < 3) { box.replaceChildren(); return; }
+  meAddTimer = setTimeout(async () => {
+    try {
+      const d = await flGet("/search-works?q=" + encodeURIComponent(q) + "&page=1");
+      const works = (d.matches || []).filter(m => ["novel", "story", "shortstory", "novella", "collection", "epic", "fairy-tale", "documental", "comix"].includes(m.name_eng)).slice(0, 8);
+      box.replaceChildren(...works.map(m => {
+        const r = { fantlab: m.work_id, title: m.rusname || m.name, authors: [m.all_autor_rusname || m.autor_rusname || ""].filter(Boolean) };
+        const h = shelfMatch(r.title, r.authors[0], r.fantlab);
+        return el("div", { class: "me-add-row" },
+          el("span", {}, r.title, " — ", r.authors.join(", "), m.year ? `, ${m.year}` : ""),
+          // Прочитанное уже на полке — в план его не поставить, он бы тут же исчез из списка.
+          h && h.b ? el("span", { class: "meta" }, "✓ уже на полке") : el("span", { class: "recbtns" }, ...KEEP.map(v => chip(MARK_BTN[v][0], "", () => {
+            markRec(r, v); e.target.value = ""; box.replaceChildren();
+          }))));
+      }));
+      if (!works.length) box.replaceChildren(el("div", { class: "fl" }, "на FantLab ничего не нашлось"));
+    } catch { box.replaceChildren(el("div", { class: "fl" }, "FantLab сейчас недоступен")); }
+  }, 450);
+});
+
 function renderMe() {
   const marks = state.marks, on = meSources();
   document.getElementById("me-src").replaceChildren(...Object.entries(ME_SRC).map(([k, label]) => chip(label, on.has(k) ? "on" : "", () => {
@@ -595,9 +633,13 @@ function renderMe() {
     localStorage.setItem("me-src-seen", JSON.stringify(Object.keys(ME_SRC)));
     renderMe();
   })));
-  const plan = planRecs();
+  const reading = markedRecs("читаю"), plan = markedRecs("план");
+  document.getElementById("me-reading-h").hidden = !reading.length;
+  document.getElementById("me-reading").replaceChildren(...reading.map(recEl));
   document.getElementById("me-plan-h").hidden = !plan.length;
   document.getElementById("me-plan").replaceChildren(...plan.map(recEl));
+  document.getElementById("me-add").hidden = !state.owner;
+  renderNowReading();
   // Старый me.json без src — всё считается «похожими».
   const all = state.me.fresh.filter(r => !marks[r.fantlab] && (r.src || ["similar"]).some(x => on.has(x)));
   state.meShown = state.meMore ? state.meShown + 30 : 30;
@@ -616,7 +658,7 @@ function renderMe() {
     (st.awards ? `, непрочитанных лауреатов и книг из списков: ${st.awards}, частых в квизах: ${st.quiz}` : "") +
     (st.friends ? `, советов друзей: ${st.friends}` : "") + ".";
   // Скрытое видит только владелец — и может вернуть по одной книге.
-  const gone = Object.entries(marks).filter(([, m]) => m.v !== "план");
+  const gone = Object.entries(marks).filter(([, m]) => !KEEP.includes(m.v));
   const box = document.getElementById("me-hidden");
   box.hidden = !state.owner || !gone.length;
   box.querySelector("summary").textContent = `Скрыто: ${gone.length}`;
@@ -792,7 +834,8 @@ function renderSuggest() {
 const sgStatus = x => x.status !== undefined ? x.status : (x.fantlab && state.marks[x.fantlab] || {}).v || null;
 function sgStatusEl(x) {
   const v = sgStatus(x);
-  const text = v === "план" ? "★ хозяин взял в план" : v === "читал" ? "✓ хозяин уже прочитал" : v === "не то" && state.owner ? "✕ не то" : null;
+  const text = v === "план" ? "★ хозяин взял в план" : v === "читаю" ? "📖 хозяин сейчас читает" : v === "читал" ? "✓ хозяин уже прочитал"
+    : v === "не то" && state.owner ? "✕ не то" : null;
   return text ? el("div", { class: "why" }, text) : null;
 }
 function sgOwner(path, body) {
@@ -844,8 +887,50 @@ document.getElementById("sg-form").addEventListener("submit", async e => {
 document.getElementById("sg-from").value = localStorage.getItem("sg-from") || "";
 
 // ---------- квизы ----------
+// Ответ — {ok, d, b}: знал ли в последний раз, когда, ступень повторения. Знал сразу — b: null, вопрос больше не
+// спрашивается. Не знал — уходит на повторение: через 1, 3, 7 и 21 день; ошибка возвращает на первую ступень,
+// четыре верных ответа подряд — выучен. У владельца ответы общие для всех устройств (Worker /quiz, через
+// очередь записей), у гостей — в этом браузере.
+const QZ_IV = [1, 3, 7, 21];
 const qzKey = q => q.u + "|" + q.q.slice(0, 40);
-const qzLog = () => JSON.parse(localStorage.getItem("quiz-log") || "{}");
+const addDays = (d, n) => { const t = new Date(d + "T00:00:00Z"); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
+// Старый формат — 1 или 0 без даты: незнание считается сегодняшним, чтобы вопрос вернулся завтра.
+const qzLocal = () => Object.fromEntries(Object.entries(JSON.parse(localStorage.getItem("quiz-log") || "{}"))
+  .map(([k, v]) => [k, typeof v === "number" ? { ok: v, d: today(), b: v ? null : 0 } : v]));
+function qzLog() {
+  if (!state.owner) return qzLocal();
+  const log = { ...qzLocal(), ...(state.qzServer || JSON.parse(localStorage.getItem("quiz-cache") || "{}")) };
+  for (const x of pending()) if (x.path === "/quiz") Object.assign(log, x.body.items);
+  return log;
+}
+const qzDue = r => r && r.b != null && r.b < QZ_IV.length ? addDays(r.d, QZ_IV[r.b]) : null;
+function qzMerge(items) {
+  state.qzServer = { ...(state.qzServer || JSON.parse(localStorage.getItem("quiz-cache") || "{}")), ...items };
+  localStorage.setItem("quiz-cache", JSON.stringify(state.qzServer));
+}
+function qzSave(key, rec) {
+  if (!state.owner) {
+    const l = JSON.parse(localStorage.getItem("quiz-log") || "{}");
+    l[key] = rec;
+    localStorage.setItem("quiz-log", JSON.stringify(l));
+    return;
+  }
+  const old = pending().find(x => x.key === "quiz");
+  enqueue("/quiz", { items: { ...(old ? old.body.items : {}), [key]: rec } }, "quiz");
+}
+// Ответы владельца с сервера; ответы, данные в этом браузере раньше, — туда же, один раз.
+async function qzSync() {
+  if (!state.owner || !localStorage.getItem("owner-key")) return;
+  try { state.qzServer = await api("/quiz"); } catch { return; }
+  localStorage.setItem("quiz-cache", JSON.stringify(state.qzServer));
+  const local = qzLocal(), fresh = Object.fromEntries(Object.entries(local).filter(([k]) => !state.qzServer[k]));
+  if (Object.keys(fresh).length) {
+    const old = pending().find(x => x.key === "quiz");
+    enqueue("/quiz", { items: { ...fresh, ...(old ? old.body.items : {}) } }, "quiz");
+  }
+  localStorage.removeItem("quiz-log");
+  if (state.quiz) renderQuizFilters();
+}
 function qzOnShelf(q) {
   const ix = awardIndex();
   return q.au.some(a => ix.byAuthor.get(surname(a))) || q.wk.some(w => ix.titles.has(stem(w)));
@@ -853,26 +938,31 @@ function qzOnShelf(q) {
 async function openQuiz() {
   if (!state.quiz) {
     state.quiz = await (await fetch("data/quiz.json")).json();
-    state.qzFilter = { sections: new Set(), shelf: false, fresh: true };
+    state.qzFilter = { sections: new Set(), shelf: false, fresh: true, repeat: false };
     document.getElementById("qz-source").textContent = "Вопросы: " + state.quiz.source + ". Авторы вопросов указаны на странице турнира.";
+    qzSync();
   }
   renderQuizFilters();
   if (!state.qzCur) nextQuiz();
 }
 function qzPool() {
-  const f = state.qzFilter, log = qzLog();
-  return state.quiz.questions.filter(q => (!f.sections.size || f.sections.has(q.s)) && (!f.shelf || qzOnShelf(q)) && (!f.fresh || !log[qzKey(q)]));
+  const f = state.qzFilter, log = qzLog(), now = today();
+  return state.quiz.questions.filter(q => (!f.sections.size || f.sections.has(q.s)) && (!f.shelf || qzOnShelf(q)) &&
+    (f.repeat ? (qzDue(log[qzKey(q)]) || "9999") <= now : !f.fresh || !log[qzKey(q)]));
 }
 function renderQuizFilters() {
   const f = state.qzFilter, secs = [...new Set(state.quiz.questions.map(q => q.s).filter(Boolean))];
+  const log = qzLog(), now = today(), due = Object.values(log).filter(r => (qzDue(r) || "9999") <= now).length;
   const toggle = v => () => { f.sections.has(v) ? f.sections.delete(v) : f.sections.add(v); renderQuizFilters(); nextQuiz(); };
   document.getElementById("qz-filters").replaceChildren(
     ...secs.map(v => chip(v, f.sections.has(v) ? "on" : "", toggle(v))),
     chip("про книги с полки", f.shelf ? "on" : "", () => { f.shelf = !f.shelf; renderQuizFilters(); nextQuiz(); }),
-    chip("только новые", f.fresh ? "on" : "", () => { f.fresh = !f.fresh; renderQuizFilters(); nextQuiz(); }));
-  const log = Object.values(qzLog()), yes = log.filter(Boolean).length;
-  document.getElementById("qz-stats").textContent = `Вопросов в подборке: ${qzPool().length}` + (log.length ? ` · отвечено ${log.length}, знали ${yes} (${Math.round(100 * yes / log.length)}%)` : "") +
-    " · статистика хранится в этом браузере";
+    f.repeat ? null : chip("только новые", f.fresh ? "on" : "", () => { f.fresh = !f.fresh; renderQuizFilters(); nextQuiz(); }),
+    chip(`🔁 повторить: ${due}`, f.repeat ? "on" : "", () => { f.repeat = !f.repeat; renderQuizFilters(); nextQuiz(); }));
+  const recs = Object.values(log), first = recs.filter(r => r.b == null).length, learned = recs.filter(r => r.b >= QZ_IV.length).length;
+  document.getElementById("qz-stats").textContent = `Вопросов в подборке: ${qzPool().length}` +
+    (recs.length ? ` · отвечено ${recs.length}: знали сразу ${first} (${pct(first, recs.length)}%), на повторении ${recs.length - first - learned}, выучено ${learned}` : "") +
+    (state.owner ? " · ответы общие для ваших устройств" : " · статистика хранится в этом браузере");
 }
 function nextQuiz() {
   const pool = qzPool();
@@ -881,10 +971,22 @@ function nextQuiz() {
 }
 function renderQuizCard(open) {
   const q = state.qzCur, box = document.getElementById("qz-card");
-  if (!q) { box.replaceChildren(el("div", { class: "count" }, "В подборке вопросов не осталось — снимите фильтр «только новые».")); return; }
-  const mark = ok => () => { const log = qzLog(); log[qzKey(q)] = ok ? 1 : 0; localStorage.setItem("quiz-log", JSON.stringify(log)); renderQuizFilters(); nextQuiz(); };
+  if (!q) {
+    const next = Object.values(qzLog()).map(qzDue).filter(d => d && d > today()).sort()[0];
+    box.replaceChildren(el("div", { class: "count" }, state.qzFilter.repeat
+      ? "На сегодня повторять нечего." + (next ? ` Следующий повтор — ${next.slice(8, 10)}.${next.slice(5, 7)}.` : "")
+      : "В подборке вопросов не осталось — снимите фильтр «только новые»."));
+    return;
+  }
+  const prev = qzLog()[qzKey(q)];
+  const mark = ok => () => {
+    const d = today();
+    qzSave(qzKey(q), !prev ? { ok: ok ? 1 : 0, d, b: ok ? null : 0 }
+      : ok ? { ok: 1, d, b: prev.b == null ? null : prev.b + 1 } : { ok: 0, d, b: 0 });
+    renderQuizFilters(); nextQuiz();
+  };
   box.replaceChildren(
-    el("div", { class: "meta" }, [q.s, q.th].filter(Boolean).join(" · ")),
+    el("div", { class: "meta" }, [q.s, q.th, prev && prev.b != null && prev.b < QZ_IV.length ? `🔁 повтор ${prev.b + 1} из ${QZ_IV.length}` : null].filter(Boolean).join(" · ")),
     el("p", { class: "qz-q" }, q.q),
     open ? el("div", {},
       el("p", { class: "qz-a" }, "Ответ: ", el("b", {}, q.a)),
@@ -1026,7 +1128,92 @@ function goPick(fill) {
   showTab("pick"); syncAndRender(); window.scrollTo(0, 0);
 }
 
+// Слова для «чем год отличался»: шкала выше обычного — первое, ниже — второе.
+const SCALE_WORDS = {
+  fantastic: ["фантастичнее", "приземлённее"], romance: ["романтичнее", "прозаичнее"], humor: ["смешнее", "серьёзнее"],
+  mystery: ["загадочнее", "прямолинейнее"], pageturner: ["увлекательнее", "неторопливее"], tension: ["напряжённее", "спокойнее"],
+  darkness: ["мрачнее", "светлее"], cozy: ["уютнее", "неуютнее"], emotional: ["эмоциональнее", "сдержаннее"],
+  depth: ["вдумчивее", "легче"], prose: ["изящнее по слогу", "проще по слогу"], difficulty: ["сложнее", "проще"],
+};
+const joinAnd = xs => xs.length > 1 ? xs.slice(0, -1).join(", ") + " и " + xs[xs.length - 1] : xs.join("");
+function reviewYears() {
+  const ys = new Set(state.lib.map(readYear).filter(y => y >= 2013));
+  return [...ys].sort((a, b) => b - a);
+}
 function renderStats() {
+  const nav = el("div", { class: "chips st-nav" },
+    chip("Вся полка", state.stReview ? "" : "on", () => { state.stReview = null; renderStats(); saveHash(); }),
+    ...reviewYears().map(y => chip(`Итоги ${y}`, state.stReview === y ? "on" : "", () => { state.stReview = y; state.stYear = null; renderStats(); saveHash(); window.scrollTo(0, 0); })));
+  if (state.stReview) { renderReview(state.stReview, nav); return; }
+  renderShelfStats(nav);
+}
+
+// Итоги года — только для лет дневника: раньше месяцы и годы помнятся приблизительно.
+function renderReview(y, nav) {
+  const lib = state.lib, box = document.getElementById("stats"), curY = new Date().getFullYear();
+  const bs = lib.filter(b => readYear(b) === y).sort((a, b) => a.read.localeCompare(b.read));
+  const prev = lib.filter(b => readYear(b) === y - 1).length;
+  const firstYear = new Map();
+  for (const b of lib) for (const a of b.authors) { const r = readYear(b); if (r && (!firstYear.has(a) || r < firstYear.get(a))) firstYear.set(a, r); }
+  const authors = new Set(bs.flatMap(b => b.authors)), newAuthors = [...authors].filter(a => firstYear.get(a) === y);
+  const rated = bs.filter(b => b.rating), avg = rated.reduce((s, b) => s + b.rating, 0) / (rated.length || 1);
+  const favs = bs.filter(b => b.fav), withYear = bs.filter(b => b.year).sort((a, b) => a.year - b.year);
+  const best = bs.filter(b => b.fav || b.shelf === "top" || b.rating === 5)
+    .sort((a, b) => (b.fav ? 1 : 0) - (a.fav ? 1 : 0) || (b.shelf === "top" ? 1 : 0) - (a.shelf === "top" ? 1 : 0) || (b.rating || 0) - (a.rating || 0)).slice(0, 12);
+  // Открытия: автор впервые на полке в этом году, и его книга — пятёрка или любимая.
+  const finds = newAuthors.map(a => [a, bs.filter(b => b.authors.includes(a) && (b.fav || b.rating === 5))]).filter(([, x]) => x.length)
+    .sort((a, b) => b[1].length - a[1].length).slice(0, 8);
+  const per = new Map();
+  for (const b of bs) for (const a of b.authors) per.set(a, (per.get(a) || 0) + 1);
+  const topAuthor = [...per.entries()].filter(([a, n]) => n >= 2 && !/коллектив|антология/i.test(a)).sort((a, b) => b[1] - a[1])[0];
+  // Чем год отличался — от всех лет дневника вместе.
+  const diary = lib.filter(b => readYear(b) >= 2013);
+  const share = (xs, g) => xs.filter(b => b.genres.includes(g)).length / (xs.length || 1);
+  const genres = [...new Set(bs.flatMap(b => b.genres))].map(g => [g, share(bs, g) - share(diary, g)]).filter(([, d]) => Math.abs(d) >= 0.08)
+    .sort((a, b) => b[1] - a[1]);
+  const mean = (xs, k) => xs.reduce((s, b) => s + (b.scales[k] || 0), 0) / (xs.length || 1);
+  const moods = Object.keys(SCALES).map(k => [k, mean(bs, k) - mean(diary, k)]).filter(([, d]) => Math.abs(d) >= 0.25)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1])).slice(0, 4).map(([k, d]) => SCALE_WORDS[k][d > 0 ? 0 : 1]);
+  const more = genres.filter(([, d]) => d > 0).slice(0, 3).map(([g]) => g);
+  const regions = new Map();
+  for (const b of bs) for (const r of b.regions) regions.set(r, (regions.get(r) || 0) + 1);
+  const byMonth = MONTHS.map((_, i) => bs.filter(b => +b.read.slice(5, 7) === i + 1));
+  const mMax = Math.max(...byMonth.map(x => x.length));
+  const card = (title, sub, ...kids) => el("section", { class: "st-card" }, el("h3", {}, title), sub ? el("div", { class: "meta" }, sub) : null, ...kids);
+  const link = b => el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(b); } }, "«" + b.title + "»");
+  const delta = bs.length - prev;
+  box.replaceChildren(...[
+    nav,
+    el("section", { class: "st-card review-hero" },
+      el("div", { class: "hero-v" }, books(bs.length)),
+      el("div", { class: "hero-s" }, `прочитано в ${y} году` + (y === curY ? " — год ещё идёт" : "") +
+        (prev ? ` · ${delta > 0 ? "на " + delta + " больше" : delta < 0 ? "на " + -delta + " меньше" : "столько же"}, чем в ${y - 1}-м` : "")),
+      moods.length || more.length ? el("p", { class: "review-mood" },
+        [moods.length ? `Год вышел ${joinAnd(moods)}, чем обычно.` : "", more.length ? `Больше обычного: ${more.join(", ")}.` : ""].filter(Boolean).join(" ")) : null,
+      el("button", { class: "link", onclick: () => shareLink(location.origin + location.pathname + "#stats?r=" + y) }, "🔗 Поделиться итогами")),
+    el("div", { class: "st-tiles" },
+      statTile("Средняя оценка", avg.toFixed(2).replace(".", ","), `пятёрок — ${pct(rated.filter(b => b.rating === 5).length, rated.length)}%`),
+      statTile("Любимых", "❤ " + favs.length, favs.length ? `${pct(favs.length, bs.length)}% года` : "пока ни одной"),
+      statTile("Авторов", plural(authors.size, "автор", "автора", "авторов"), `новых для полки — ${newAuthors.length}`),
+      withYear.length ? statTile("Самая старая", String(withYear[0].year), withYear[0].title) : null,
+      withYear.length ? statTile("Самая свежая", String(withYear[withYear.length - 1].year), withYear[withYear.length - 1].title) : null),
+    best.length ? card("Лучшее за год", "Любимое, топ и пятёрки. Нажмите на обложку — откроется карточка.",
+      el("div", { class: "tiles" }, ...best.map(b => tile(b.title, b.authors.join(", "), null, { b })))) : null,
+    el("div", { class: "st-grid" },
+      finds.length ? card("Открытия года", "Авторы, впервые прочитанные в этом году, — и сразу на пятёрку.",
+        el("ul", { class: "review-list" }, ...finds.map(([a, xs]) => el("li", {}, el("b", {}, a), " — ", ...xs.slice(0, 2).flatMap((b, i) => [i ? ", " : "", link(b)]))))) : null,
+      topAuthor ? card("Автор года", "", el("p", { class: "review-author" }, el("b", {}, topAuthor[0]), ` — ${books(topAuthor[1])}`),
+        el("ul", { class: "review-list" }, ...bs.filter(b => b.authors.includes(topAuthor[0])).map(b => el("li", {}, link(b), " ", el("span", { class: "stars" }, stars(b.rating)))))) : null),
+    el("div", { class: "st-grid" },
+      card("По месяцам", "Наведите на столбик — покажу, что читалось.", columns(byMonth.map((xs, i) => ({ v: xs.length, axis: MONTHS[i].slice(0, 3), label_v: xs.length === mMax && mMax > 0,
+        tip: [books(xs.length), MONTHS[i] + (xs.length ? ": " + xs.slice(0, 4).map(b => "«" + b.title + "»").join(", ") + (xs.length > 4 ? "…" : "") : "")] })), { cls: "cc-short" })),
+      regions.size ? card("Где побывали", "", hbars([...regions.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([r, n]) => ({ label: r, v: n, tip: [books(n), r] })))) : null),
+    card(`Все книги ${y} года`, "", el("div", { id: "review-list", class: "list" })),
+  ].filter(Boolean));
+  renderList("review-list", [...bs].reverse());
+}
+
+function renderShelfStats(nav) {
   const lib = state.lib, box = document.getElementById("stats");
   const now = new Date(), curY = now.getFullYear(), curM = now.getMonth() + 1;
   const dated = lib.filter(b => readYear(b));
@@ -1098,6 +1285,7 @@ function renderStats() {
   const sel = state.stYear && byYear.has(state.stYear) ? state.stYear : null;
   const card = (title, sub, ...kids) => el("section", { class: "st-card" }, el("h3", {}, title), sub ? el("div", { class: "meta" }, sub) : null, ...kids);
   box.replaceChildren(...[
+    nav,
     el("div", { class: "st-tiles" },
       statTile("Прочитано", books(lib.length), plural(authors.size, "автор", "автора", "авторов")),
       statTile(`В ${curY} году`, books(thisYear), `за то же время в ${curY - 1}-м — ${lastSame}`),
@@ -1111,6 +1299,7 @@ function renderStats() {
       el("details", { class: "st-table" }, el("summary", {}, "Таблицей"),
         el("table", {}, el("tbody", {}, ...years.filter(y => byYear.has(y)).map(y => el("tr", {}, el("th", {}, y), el("td", {}, byYear.get(y).length))))))),
     sel ? el("section", { class: "st-card", id: "st-year" }, el("h3", {}, `${sel} — ${books(byYear.get(sel).length)} `,
+        sel >= 2013 ? el("button", { class: "link", onclick: () => { state.stReview = sel; state.stYear = null; renderStats(); saveHash(); window.scrollTo(0, 0); } }, "итоги года →") : null,
         el("button", { class: "link", onclick: () => { state.stYear = null; renderStats(); saveHash(); } }, "✕ свернуть")),
       el("div", { id: "st-year-list", class: "list" })) : null,
     el("div", { class: "st-grid" },
@@ -1151,6 +1340,7 @@ function hashFor() {
     if (q) p.set("q", q);
     if (s !== "read") p.set("sort", s);
   } else if (tab === "awards" && state.awId) p.set("id", state.awId);
+  else if (tab === "stats" && state.stReview) p.set("r", state.stReview);
   else if (tab === "stats" && state.stYear) p.set("y", state.stYear);
   else if (tab === "quiz" && !document.getElementById("qz-read").hidden) p.set("mode", "read");
   if (state.cardId) p.set("book", state.cardId);
@@ -1191,7 +1381,7 @@ async function applyHash() {
     if (ALL_SORT[p.get("sort")]) document.getElementById("all-sort").value = p.get("sort");
     renderAll();
   } else if (tab === "awards") state.awWant = +p.get("id") || null;
-  else if (tab === "stats") state.stYear = +p.get("y") || null;
+  else if (tab === "stats") { state.stYear = +p.get("y") || null; state.stReview = +p.get("r") || null; }
   await showTab(tab);
   if (tab === "quiz" && p.get("mode") === "read") document.getElementById("qz-mode-read").click();
   const book = state.lib.find(x => x.id === +p.get("book"));
