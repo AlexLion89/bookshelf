@@ -58,11 +58,19 @@ const THEME_SYNONYMS = [
 const state = { lib: [], vocab: {}, pick: emptyFilter(), like: [] };
 // Правки владельца (❤) и предложения друзей — Cloudflare Worker, исходник в bookshelf-data/worker.
 const API = "https://shelf-api.sirenyov.workers.dev";
+// С телефона первое соединение с Worker бывает дольше 6 секунд: ждём до 15 и при обрыве пробуем ещё раз.
+// Все записи, кроме нового предложения, можно безопасно повторить — они ставят значение, а не добавляют.
 async function api(path, body) {
   const key = localStorage.getItem("owner-key");
-  const opt = { signal: AbortSignal.timeout(6000), headers: key ? { Authorization: "Bearer " + key } : {} };
-  if (body) Object.assign(opt, { method: "POST", body: JSON.stringify(body), headers: { ...opt.headers, "Content-Type": "application/json" } });
-  const r = await fetch(API + path, opt);
+  const retry = !(body && path === "/suggest");
+  let r;
+  for (let i = 0; ; i++) {
+    const opt = { signal: AbortSignal.timeout(15000), headers: key ? { Authorization: "Bearer " + key } : {} };
+    if (body) Object.assign(opt, { method: "POST", body: JSON.stringify(body), headers: { ...opt.headers, "Content-Type": "application/json" } });
+    try { r = await fetch(API + path, opt); break; } catch (e) {
+      if (!retry || i >= 1) throw new Error(/abort|timeout/i.test(e.name + e.message) ? "сервер не ответил — проверьте интернет и попробуйте ещё раз" : e.message);
+    }
+  }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(d.error || "ошибка " + r.status), { status: r.status });
   return d;
@@ -137,7 +145,9 @@ async function load() {
   document.getElementById("owner-link").replaceChildren(el("a", { href: "#", onclick: e => {
     e.preventDefault(); owner ? ownerLogout() : ownerLogin();
   } }, owner ? "Выйти из режима владельца" : "Я хозяин полки"));
-  const marks = api("/me").catch(() => ({}));
+  // Отметки и ❤ с сервера приходят следом и дорисовываются: книги не ждут медленной сети.
+  const marks = api("/me").catch(() => null), favs = api("/fav").catch(() => null);
+  setMarks({});
   const m = await fetch("data/me.json").catch(() => null);
   if (m && m.ok) {
     state.me = await m.json();
@@ -151,8 +161,7 @@ async function load() {
     }
   }
   if (!state.lib.length) state.lib = await (await fetch(url)).json();
-  setMarks(await marks);
-  if (state.me) { renderMe(); if (owner) migrateHidden(); }
+  if (state.me) renderMe();
   for (const b of state.lib) {
     b._text = norm([b.title, b.bm_title, ...b.authors, b.orig, ...b.themes, ...(b.tags || []), ...b.genres, ...(b.contains || []),
                     b.series && b.series.name, b.series && b.series.sub].join(" | "));
@@ -163,11 +172,6 @@ async function load() {
     return [...c.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
   };
   state.vocab = { genres: count("genres"), places: count("places"), regions: count("regions"), eras: count("eras"), themes: count("themes") };
-  try {
-    const fav = await api("/fav");
-    const on = new Set(fav.on), off = new Set(fav.off);
-    for (const b of state.lib) if (on.has(b.id)) b.fav = true; else if (off.has(b.id)) b.fav = false;
-  } catch { /* без API — любимое как при сборке */ }
   const t = await fetch("data/themes.json").catch(() => null);
   state.themeGroups = t && t.ok ? await t.json() : {};
   buildFilters();
@@ -176,6 +180,18 @@ async function load() {
   renderFav();
   await applyHash();
   state.hashReady = true;
+  marks.then(m => {
+    if (!m) return;   // без API — отметки только из этого браузера
+    setMarks(m);
+    if (state.me) { renderMe(); if (owner) migrateHidden(); }
+  });
+  favs.then(fav => {
+    if (!fav) return;   // без API — любимое как при сборке
+    const on = new Set(fav.on), off = new Set(fav.off);
+    for (const b of state.lib) if (on.has(b.id)) b.fav = true; else if (off.has(b.id)) b.fav = false;
+    renderPick(); renderFav(); renderAll("keep");
+    if (document.getElementById("tab-stats").classList.contains("active")) renderStats();
+  });
 }
 
 // ---------- фильтры ----------
@@ -439,7 +455,7 @@ function renderAll(more) {
   const q = norm(document.getElementById("all-search").value).trim();
   const res = (q ? state.lib.filter(b => q.split(/\s+/).every(w => b._text.includes(w))) : [...state.lib])
     .sort(ALL_SORT[document.getElementById("all-sort").value]);
-  state.allShown = more === true ? state.allShown + ALL_PAGE : ALL_PAGE;
+  state.allShown = more === true ? state.allShown + ALL_PAGE : more === "keep" ? state.allShown : ALL_PAGE;
   document.getElementById("all-count").textContent = `Книг: ${res.length}` + (res.length > state.allShown ? ` · показаны первые ${state.allShown}` : "");
   renderList("all-list", res.slice(0, state.allShown), q ? b => matchedContains(b, q) : null);
   const btn = document.getElementById("all-more");
