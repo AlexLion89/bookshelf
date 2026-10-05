@@ -591,8 +591,28 @@ function markedRecs(v) {
       why_auto: m.from ? `Советует ${m.from}.` : null })
     .filter(r => { const h = shelfMatch(r.title, r.authors[0], r.fantlab); return !(h && h.b); });
 }
+// Отметка без обложки (книгу нашли поиском до того, как он стал сохранять обложку, или её нет в me.json) —
+// обложка берётся из карточки FantLab; владелец сохраняет её на сервер, чтобы не искать снова.
+const coverAsked = new Set();
+function fillCovers() {
+  const known = new Set([...(state.me ? [...state.me.fresh, ...state.me.continue, ...(state.me.plan || [])] : [])].filter(r => r.image).map(r => r.fantlab));
+  for (const [id, m] of Object.entries(state.marks)) {
+    if (!KEEP.includes(m.v) || m.image || known.has(+id) || coverAsked.has(id)) continue;
+    coverAsked.add(id);
+    flGet(`/work/${id}`).then(w => {
+      const img = (w.image || "").split("?")[0];
+      const cur = state.marks[id];
+      if (!img || !cur || cur.v !== m.v) return;
+      cur.image = "https://fantlab.ru" + img;
+      if (state.owner && localStorage.getItem("owner-key"))
+        enqueue("/me", { fantlab: +id, v: cur.v, title: cur.title, authors: cur.authors || [], image: cur.image, from: cur.from || null }, "me:" + id);
+      if (state.me) renderMe(); else renderNowReading();
+    }).catch(() => coverAsked.delete(id));
+  }
+}
 // «Сейчас читаю» — полоской над подбором, её видят и гости.
 function renderNowReading() {
+  fillCovers();
   const box = document.getElementById("now-reading"), rs = markedRecs("читаю");
   box.hidden = !rs.length;
   box.replaceChildren(el("span", { class: "nr-h" }, state.owner ? "📖 Сейчас читаю:" : "📖 Хозяин сейчас читает:"),
@@ -611,7 +631,9 @@ document.getElementById("me-add-search").addEventListener("input", e => {
       const d = await flGet("/search-works?q=" + encodeURIComponent(q) + "&page=1");
       const works = (d.matches || []).filter(m => ["novel", "story", "shortstory", "novella", "collection", "epic", "fairy-tale", "documental", "comix"].includes(m.name_eng)).slice(0, 8);
       box.replaceChildren(...works.map(m => {
-        const r = { fantlab: m.work_id, title: m.rusname || m.name, authors: [m.all_autor_rusname || m.autor_rusname || ""].filter(Boolean) };
+        const pic = m.pic_edition_id || m.pic_edition_id_auto;
+        const r = { fantlab: m.work_id, title: m.rusname || m.name, authors: [m.all_autor_rusname || m.autor_rusname || ""].filter(Boolean),
+                    image: pic ? `https://fantlab.ru/images/editions/big/${pic}` : null };
         const h = shelfMatch(r.title, r.authors[0], r.fantlab);
         return el("div", { class: "me-add-row" },
           el("span", {}, r.title, " — ", r.authors.join(", "), m.year ? `, ${m.year}` : ""),
