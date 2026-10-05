@@ -58,17 +58,19 @@ const THEME_SYNONYMS = [
 const state = { lib: [], vocab: {}, pick: emptyFilter(), like: [] };
 // Правки владельца (❤) и предложения друзей — Cloudflare Worker, исходник в bookshelf-data/worker.
 const API = "https://shelf-api.sirenyov.workers.dev";
-// С телефона первое соединение с Worker бывает дольше 6 секунд: ждём до 15 и при обрыве пробуем ещё раз.
-// Все записи, кроме нового предложения, можно безопасно повторить — они ставят значение, а не добавляют.
+// Из мобильной сети соединение с Worker (Cloudflare) то медленное, то рвётся («Load failed», «Fetch is aborted»):
+// до 15 секунд на попытку и три попытки. Все записи, кроме нового предложения, можно безопасно повторить —
+// они ставят значение, а не добавляют.
 async function api(path, body) {
   const key = localStorage.getItem("owner-key");
-  const retry = !(body && path === "/suggest");
+  const tries = body && path === "/suggest" ? 1 : 3;
   let r;
   for (let i = 0; ; i++) {
     const opt = { signal: AbortSignal.timeout(15000), headers: key ? { Authorization: "Bearer " + key } : {} };
     if (body) Object.assign(opt, { method: "POST", body: JSON.stringify(body), headers: { ...opt.headers, "Content-Type": "application/json" } });
     try { r = await fetch(API + path, opt); break; } catch (e) {
-      if (!retry || i >= 1) throw new Error(/abort|timeout/i.test(e.name + e.message) ? "сервер не ответил — проверьте интернет и попробуйте ещё раз" : e.message);
+      if (i + 1 >= tries) throw Object.assign(new Error("нет связи с сервером — попробуйте ещё раз"), { network: true });
+      await new Promise(ok => setTimeout(ok, 1000 * (i + 1)));
     }
   }
   const d = await r.json().catch(() => ({}));
@@ -76,14 +78,72 @@ async function api(path, body) {
   return d;
 }
 // Запись от имени владельца: пароль спрашивается один раз и запоминается в браузере.
-async function ownerApi(path, body) {
-  if (!localStorage.getItem("owner-key")) {
-    const k = prompt("Пароль владельца (запомнится в этом браузере):");
-    if (!k) throw Object.assign(new Error("нужен пароль владельца"), { silent: true });
-    localStorage.setItem("owner-key", k);
+function haveKey() {
+  if (localStorage.getItem("owner-key")) return true;
+  const k = prompt("Пароль владельца (запомнится на этом устройстве):");
+  if (k) localStorage.setItem("owner-key", k);
+  return !!k;
+}
+
+// ---------- очередь записей ----------
+// Отметка, ❤ и ответ другу сразу видны на экране, а на сервер уходят из очереди в localStorage: с повторами,
+// пока не получится, — очередь переживает и плохую сеть, и перезапуск. Пока в ней что-то есть, в шапке «⏳».
+// Ключ записи — что именно меняется: новое нажатие на ту же книгу заменяет старое, а не встаёт следом.
+const PENDING = "pending-writes";
+const pending = () => JSON.parse(localStorage.getItem(PENDING) || "[]");
+const savePending = q => { localStorage.setItem(PENDING, JSON.stringify(q)); paintPending(); };
+function enqueue(path, body, key) {
+  savePending([...pending().filter(x => x.key !== key), { path, body, key }]);
+  flushDelay = 3000;
+  flush();
+}
+let flushing = false, flushTimer, flushDelay = 3000;
+async function flush() {
+  if (flushing || !pending().length || !localStorage.getItem("owner-key")) return;
+  flushing = true;
+  clearTimeout(flushTimer);
+  let x;
+  try {
+    while ((x = pending()[0])) {
+      await api(x.path, x.body);
+      // Пока запрос шёл, ту же книгу могли нажать снова — тогда в очереди уже новая запись, её не трогаем.
+      savePending(pending().filter(y => !(y.key === x.key && JSON.stringify(y.body) === JSON.stringify(x.body))));
+    }
+    flushDelay = 3000;
+    refreshFromServer();
+  } catch (e) {
+    if (e.status === 401) {
+      localStorage.removeItem("owner-key");
+      alert("Пароль владельца не подошёл — войдите заново (ссылка внизу страницы). Несохранённые отметки подождут.");
+    } else if (e.status >= 400 && e.status < 500) {
+      savePending(pending().filter(y => y !== x && y.key !== x.key));   // сервер такое не примет никогда — не держать
+    } else {
+      flushTimer = setTimeout(flush, flushDelay);
+      flushDelay = Math.min(flushDelay * 2, 120000);
+    }
+  } finally {
+    flushing = false;
+    paintPending();
   }
-  try { return await api(path, body); }
-  catch (e) { if (e.status === 401) localStorage.removeItem("owner-key"); throw e; }
+}
+function paintPending() {
+  const n = pending().length, b = document.getElementById("pending");
+  b.hidden = !n;
+  b.textContent = `⏳ сохраняю: ${n}`;
+  b.title = localStorage.getItem("owner-key") ? "Нет связи с сервером — повторяю. Нажмите, чтобы попробовать сейчас." : "Нужен пароль владельца";
+}
+// Свежие отметки и ❤ с сервера; несохранённое из очереди накладывается сверху.
+async function refreshFromServer() {
+  const [m, fav] = await Promise.all([api("/me").catch(() => null), api("/fav").catch(() => null)]);
+  state.synced = !!(m && fav);
+  if (m) { setMarks(m); if (state.me) renderMe(); }
+  if (fav) {
+    const on = new Set(fav.on), off = new Set(fav.off);
+    for (const x of pending()) if (x.path === "/fav") { on.delete(x.body.id); off.delete(x.body.id); (x.body.on ? on : off).add(x.body.id); }
+    for (const b of state.lib) if (on.has(b.id)) b.fav = true; else if (off.has(b.id)) b.fav = false;
+    renderPick(); renderFav(); renderAll("keep");
+    if (document.getElementById("tab-stats").classList.contains("active")) renderStats();
+  }
 }
 
 // Слово ищется с начала слова: основа «кот» не должна находить «который».
@@ -145,8 +205,6 @@ async function load() {
   document.getElementById("owner-link").replaceChildren(el("a", { href: "#", onclick: e => {
     e.preventDefault(); owner ? ownerLogout() : ownerLogin();
   } }, owner ? "Выйти из режима владельца" : "Я хозяин полки"));
-  // Отметки и ❤ с сервера приходят следом и дорисовываются: книги не ждут медленной сети.
-  const marks = api("/me").catch(() => null), favs = api("/fav").catch(() => null);
   setMarks({});
   const m = await fetch("data/me.json").catch(() => null);
   if (m && m.ok) {
@@ -180,18 +238,11 @@ async function load() {
   renderFav();
   await applyHash();
   state.hashReady = true;
-  marks.then(m => {
-    if (!m) return;   // без API — отметки только из этого браузера
-    setMarks(m);
-    if (state.me) { renderMe(); if (owner) migrateHidden(); }
-  });
-  favs.then(fav => {
-    if (!fav) return;   // без API — любимое как при сборке
-    const on = new Set(fav.on), off = new Set(fav.off);
-    for (const b of state.lib) if (on.has(b.id)) b.fav = true; else if (off.has(b.id)) b.fav = false;
-    renderPick(); renderFav(); renderAll("keep");
-    if (document.getElementById("tab-stats").classList.contains("active")) renderStats();
-  });
+  // Отметки и ❤ с сервера приходят следом и дорисовываются: книги не ждут медленной сети.
+  if (owner) migrateHidden();
+  paintPending();
+  refreshFromServer();
+  flush();
 }
 
 // ---------- фильтры ----------
@@ -473,34 +524,32 @@ function matchedContains(b, q) {
 // (recommend_me.py) забирает их оттуда. Старые отметки из этого браузера переносятся туда один раз.
 const MARK_BTN = { "план": ["★ в план", "★ в плане"], "читал": ["✓ читал", "✓ читал"], "не то": ["✕ не то", "✕ не то"] };
 const localHidden = () => JSON.parse(localStorage.getItem("me-hidden") || "{}");
+const today = () => new Date().toISOString().slice(0, 10);
 function setMarks(server) {
   state.marks = { ...server };
-  if (state.owner) for (const [id, x] of Object.entries(localHidden())) state.marks[id] ??= { v: x.why, title: x.title, authors: [], local: true };
-}
-async function migrateHidden() {
-  const local = Object.entries(state.marks).filter(([, m]) => m.local);
-  if (!local.length) { localStorage.removeItem("me-hidden"); return; }
-  if (!localStorage.getItem("owner-key")) return;   // перенесётся, когда владелец введёт пароль
-  try {
-    let server;
-    for (const [id, m] of local) server = await api("/me", { fantlab: +id, v: m.v, title: m.title });
-    localStorage.removeItem("me-hidden");
-    setMarks(server);
-    renderMe();
-  } catch { /* попробуем при следующем открытии */ }
-}
-async function markRec(r, v) {
-  const was = state.marks[r.fantlab], next = was && was.v === v ? null : v;   // повторное нажатие снимает отметку
-  if (was && was.local) { const h = localHidden(); delete h[r.fantlab]; localStorage.setItem("me-hidden", JSON.stringify(h)); }
-  const body = { fantlab: r.fantlab, v: next, title: r.title, authors: r.authors, image: r.image || null, from: (r.friends || [])[0]?.from };
-  if (next) state.marks[r.fantlab] = { ...body, date: new Date().toISOString().slice(0, 10) }; else delete state.marks[r.fantlab];
-  renderMe();
-  try { setMarks(await ownerApi("/me", body)); renderMe(); migrateHidden(); }
-  catch (e) {
-    if (was) state.marks[r.fantlab] = was; else delete state.marks[r.fantlab];
-    renderMe();
-    if (!e.silent) alert("Не сохранилось: " + e.message);
+  for (const x of pending()) {
+    if (x.path === "/me") { if (x.body.v) state.marks[x.body.fantlab] = { ...x.body, date: today() }; else delete state.marks[x.body.fantlab]; }
+    if (x.path === "/suggest/status" && x.body.fantlab) {
+      if (x.body.v) state.marks[x.body.fantlab] = { v: x.body.v, title: x.body.title, authors: x.body.author ? [x.body.author] : [], from: x.body.from, date: today() };
+      else delete state.marks[x.body.fantlab];
+    }
   }
+}
+// Отметки, поставленные до того, как они стали жить на сервере, — в очередь, оттуда на сервер.
+function migrateHidden() {
+  const local = Object.entries(localHidden());
+  if (!local.length) return;
+  for (const [id, m] of local) if (!state.marks[id]) state.marks[id] = { v: m.why, title: m.title, authors: [] };
+  savePending([...pending(), ...local.map(([id, m]) => ({ path: "/me", body: { fantlab: +id, v: m.why, title: m.title }, key: "me:" + id }))]);
+  localStorage.removeItem("me-hidden");
+}
+function markRec(r, v) {
+  if (!haveKey()) return;
+  const was = state.marks[r.fantlab], next = was && was.v === v ? null : v;   // повторное нажатие снимает отметку
+  const body = { fantlab: r.fantlab, v: next, title: r.title, authors: r.authors, image: r.image || null, from: (r.friends || [])[0]?.from };
+  if (next) state.marks[r.fantlab] = { ...body, date: today() }; else delete state.marks[r.fantlab];
+  renderMe();
+  enqueue("/me", body, "me:" + r.fantlab);
 }
 function recEl(r) {
   const fl = `https://fantlab.ru/work${r.fantlab}`, mark = state.marks[r.fantlab];
@@ -711,8 +760,17 @@ function shelfMatch(title, author, fl) {
 async function openSuggest() {
   const box = document.getElementById("sg-list");
   box.replaceChildren(el("div", { class: "count" }, "Загружаю…"));
-  let list;
-  try { list = await api("/suggest"); } catch { box.replaceChildren(el("div", { class: "count" }, "Список сейчас недоступен.")); return; }
+  try { state.sgList = await api("/suggest"); } catch { box.replaceChildren(el("div", { class: "count" }, "Список сейчас недоступен.")); return; }
+  renderSuggest();
+}
+function renderSuggest() {
+  const box = document.getElementById("sg-list"), list = state.sgList;
+  // Ответы владельца, ещё не дошедшие до сервера, — поверх списка.
+  for (const p of pending()) {
+    const x = list.find(y => y.id === p.body.id);
+    if (x && p.path === "/suggest/status") x.status = p.body.v;
+    if (x && p.path === "/suggest/hide") x.hidden = p.body.hidden;
+  }
   list.sort((a, b) => b.date.localeCompare(a.date));
   box.replaceChildren(...(list.length ? list.map(x => {
     const h = shelfMatch(x.title, x.author, x.fantlab);
@@ -737,13 +795,15 @@ function sgStatusEl(x) {
   const text = v === "план" ? "★ хозяин взял в план" : v === "читал" ? "✓ хозяин уже прочитал" : v === "не то" && state.owner ? "✕ не то" : null;
   return text ? el("div", { class: "why" }, text) : null;
 }
-async function sgOwner(path, body) {
-  try {
-    await ownerApi(path, body);
-    setMarks(await api("/me"));
-    openSuggest();
-    if (state.me) renderMe();
-  } catch (e) { if (!e.silent) alert("Не сохранилось: " + e.message); }
+function sgOwner(path, body) {
+  if (!haveKey()) return;
+  const x = state.sgList.find(y => y.id === body.id);
+  // Книга и друг — только для показа до ответа сервера; Worker берёт их из самого предложения.
+  if (path === "/suggest/status" && x.fantlab) body = { ...body, fantlab: x.fantlab, title: x.title, author: x.author, from: x.from };
+  enqueue(path, body, path + ":" + body.id);
+  setMarks(state.marks);   // сразу наложить отметку на «Мне почитать»
+  renderSuggest();
+  if (state.me) renderMe();
 }
 let sgTimer, sgPicked = null;
 document.getElementById("sg-search").addEventListener("input", e => {
@@ -1261,12 +1321,11 @@ function renderFavAuthors() {
       el("a", { href: "#", onclick: e => { e.preventDefault(); showSeries(x.name); } }, x.name),
       el("span", { class: "meta" }, " — " + fmt(x))))))));
 }
-async function toggleFav(b) {
-  try {
-    await ownerApi("/fav", { id: b.id, on: !b.fav });
-    b.fav = !b.fav;
-    renderFav(); renderPick(); openCard(b);
-  } catch (e) { if (!e.silent) alert("Не сохранилось: " + e.message); }
+function toggleFav(b) {
+  if (!haveKey()) return;
+  b.fav = !b.fav;
+  enqueue("/fav", { id: b.id, on: b.fav }, "fav:" + b.id);
+  renderFav(); renderPick(); renderAll("keep"); openCard(b);
 }
 
 function openCard(b) {
@@ -1361,6 +1420,14 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.ser
 // Вернулись спустя полдня — страница перечитывается с сервера; вид сохраняется в адресе.
 const loadedAt = Date.now();
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && Date.now() - loadedAt > 6 * 3600e3) location.reload();
+  if (document.visibilityState !== "visible") return;
+  if (Date.now() - loadedAt > 6 * 3600e3) { location.reload(); return; }
+  flushDelay = 3000; flush();
+  if (!state.synced && state.hashReady) refreshFromServer();   // при открытии сервер не ответил — догрузить
+});
+window.addEventListener("online", () => { flushDelay = 3000; flush(); });
+document.getElementById("pending").addEventListener("click", () => {
+  if (!localStorage.getItem("owner-key") && !haveKey()) return;
+  flushDelay = 3000; flush();
 });
 load();
