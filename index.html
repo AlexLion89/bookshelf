@@ -9,16 +9,23 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="style.css">
+<script>
+  // Выбранная тема — до отрисовки, чтобы страница не мигала светлой.
+  try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 </head>
 <body>
 <header>
   <h1>📚 Книжная полка Alex Lion <span id="owner-badge" hidden>· режим владельца</span></h1>
+  <button id="theme" class="theme" type="button"></button>
+  <button id="share" class="share" type="button" title="Скопировать ссылку на то, что сейчас на экране">🔗<span> Поделиться</span></button>
   <nav>
     <button data-tab="pick" class="active">Подобрать</button>
     <button data-tab="like">Похоже на…</button>
     <button data-tab="all">Все книги</button>
     <button data-tab="fav">Любимое</button>
     <button data-tab="me" id="me-btn" hidden>Мне почитать</button>
+    <button data-tab="stats">Статистика</button>
     <button data-tab="awards">Премии</button>
     <button data-tab="suggest">Предложить книгу</button>
     <button data-tab="quiz">Квизы</button>
@@ -117,17 +124,22 @@
     <p class="meta" id="qz-source"></p>
   </section>
 
+  <section id="tab-stats" class="tab"><div id="stats"></div></section>
+
   <section id="tab-me" class="tab">
-    <p class="hint" id="me-hint">Непрочитанное из трёх источников — похожие на ваши пятёрки, лауреаты премий и списков лучших, частые в квизах — по близости к вашему вкусу. Источники можно включать и выключать.
-      «Читал» и «Не то» прячут книгу; скажите мне — учту в следующем пересчёте.</p>
+    <p class="hint" id="me-hint">Непрочитанное из четырёх источников — похожие на ваши пятёрки, лауреаты премий и списков лучших, частые в квизах, советы друзей — по близости к вашему вкусу. Источники можно включать и выключать.
+      «★ в план» откладывает книгу наверх, «✓ читал» и «✕ не то» прячут её. Отметки хранятся на сервере — видны с любого устройства и учитываются при пересчёте.</p>
     <div id="me-src" class="chips"></div>
     <div id="me-count" class="count"></div>
+    <h3 id="me-plan-h" hidden>В планах</h3>
+    <div id="me-plan" class="list"></div>
     <h3>Новое</h3>
     <div id="me-found" class="count"></div>
     <div id="me-fresh" class="list"></div>
     <button id="me-more" class="more" hidden>Показать ещё</button>
     <h3>Продолжить начатые циклы</h3>
     <div id="me-continue" class="list"></div>
+    <details id="me-hidden" class="me-hidden" hidden><summary></summary><div></div></details>
   </section>
 </main>
 

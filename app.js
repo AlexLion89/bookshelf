@@ -67,6 +67,16 @@ async function api(path, body) {
   if (!r.ok) throw Object.assign(new Error(d.error || "ошибка " + r.status), { status: r.status });
   return d;
 }
+// Запись от имени владельца: пароль спрашивается один раз и запоминается в браузере.
+async function ownerApi(path, body) {
+  if (!localStorage.getItem("owner-key")) {
+    const k = prompt("Пароль владельца (запомнится в этом браузере):");
+    if (!k) throw Object.assign(new Error("нужен пароль владельца"), { silent: true });
+    localStorage.setItem("owner-key", k);
+  }
+  try { return await api(path, body); }
+  catch (e) { if (e.status === 401) localStorage.removeItem("owner-key"); throw e; }
+}
 
 // Слово ищется с начала слова: основа «кот» не должна находить «который».
 const wordRe = new Map();
@@ -99,6 +109,7 @@ async function load() {
     if (r && r.ok) { state.lib = await r.json(); document.getElementById("owner-badge").hidden = false; }
   }
   state.owner = owner;
+  const marks = api("/me").catch(() => ({}));
   const m = await fetch("data/me.json").catch(() => null);
   if (m && m.ok) {
     state.me = await m.json();
@@ -107,11 +118,13 @@ async function load() {
     if (!owner) {
       btn.textContent = "Что почитать хозяину";
       document.getElementById("me-hint").textContent = "Чего хозяин полки ещё не читал, но, судя по его пятёркам, должно понравиться. " +
-        "Если хотите подарить книгу — начните отсюда.";
+        "Если хотите подарить книгу — начните отсюда: сверху то, что он сам собирается прочитать.";
+      document.getElementById("me-plan-h").textContent = "Хозяин собирается прочитать";
     }
-    renderMe();
   }
   if (!state.lib.length) state.lib = await (await fetch(url)).json();
+  setMarks(await marks);
+  if (state.me) { renderMe(); if (owner) migrateHidden(); }
   for (const b of state.lib) {
     b._text = norm([b.title, b.bm_title, ...b.authors, b.orig, ...b.themes, ...(b.tags || []), ...b.genres, ...(b.contains || []),
                     b.series && b.series.name, b.series && b.series.sub].join(" | "));
@@ -133,6 +146,8 @@ async function load() {
   renderPick();
   renderAll();
   renderFav();
+  await applyHash();
+  state.hashReady = true;
 }
 
 // ---------- фильтры ----------
@@ -161,7 +176,7 @@ function buildFilters() {
         .map(t => chip(t, f.themes.has(t) ? "on" : "", toggleSet(f.themes, t)))))));
 }
 
-function syncAndRender() { buildFilters(); renderUnderstood(); renderPick(); }
+function syncAndRender() { buildFilters(); renderUnderstood(); renderPick(); saveHash(); }
 
 function parseAsk(text) {
   const f = emptyFilter();
@@ -328,12 +343,13 @@ async function addLibraryLike(b) {
 async function addExternalLike(m) {
   const key = "f" + m.work_id;
   if (state.like.some(x => x.key === key)) return;
-  const item = { key, title: m.rusname || m.name, ext: true, book: null, similars: new Set() };
+  const item = { key, title: m.rusname || m.name || "FantLab " + m.work_id, ext: true, book: null, similars: new Set() };
   state.like.push(item);
   renderLike();
   try {
     const [work, sim] = await Promise.all([flGet(`/work/${m.work_id}/extended`), similarsOf(m.work_id)]);
     item.book = externalBook(work);
+    if (!m.rusname && !m.name) item.title = work.work_name || item.title;   // пришло по ссылке — только id
     item.similars = sim;
   } catch (e) { item.error = true; }
   renderLike();
@@ -344,6 +360,7 @@ function renderLike() {
     chip((x.ext ? "🌐 " : "") + x.title + (x.ext && !x.book && !x.error ? " …" : "") + " ✕", "on",
          () => { state.like = state.like.filter(y => y !== x); renderLike(); })));
   const list = document.getElementById("like-list");
+  saveHash();
   const ready = state.like.filter(x => x.book);
   if (!ready.length) { list.replaceChildren(); return; }
   const profile = new Map();
@@ -398,6 +415,7 @@ function renderAll(more) {
   document.getElementById("all-count").textContent = `Книг: ${res.length}` + (res.length > state.allShown ? ` · показаны первые ${state.allShown}` : "");
   renderList("all-list", res.slice(0, state.allShown), q ? b => matchedContains(b, q) : null);
   const btn = document.getElementById("all-more");
+  saveHash();
   btn.hidden = res.length <= state.allShown;
   btn.textContent = `Показать ещё ${Math.max(0, Math.min(ALL_PAGE, res.length - state.allShown))}`;
 }
@@ -406,16 +424,42 @@ function matchedContains(b, q) {
   return hit && !norm(b.title).includes(q) ? "Внутри: «" + hit + "»" : "";
 }
 
-// ---------- мне почитать (только режим владельца) ----------
-const hidden = () => JSON.parse(localStorage.getItem("me-hidden") || "{}");
-function hideRec(r, why) {
-  const h = hidden();
-  h[r.fantlab] = { why, title: r.title };
-  localStorage.setItem("me-hidden", JSON.stringify(h));
+// ---------- мне почитать ----------
+// Отметки владельца («план», «читал», «не то») живут в Worker и видны с любого устройства; сборка
+// (recommend_me.py) забирает их оттуда. Старые отметки из этого браузера переносятся туда один раз.
+const MARK_BTN = { "план": ["★ в план", "★ в плане"], "читал": ["✓ читал", "✓ читал"], "не то": ["✕ не то", "✕ не то"] };
+const localHidden = () => JSON.parse(localStorage.getItem("me-hidden") || "{}");
+function setMarks(server) {
+  state.marks = { ...server };
+  if (state.owner) for (const [id, x] of Object.entries(localHidden())) state.marks[id] ??= { v: x.why, title: x.title, authors: [], local: true };
+}
+async function migrateHidden() {
+  const local = Object.entries(state.marks).filter(([, m]) => m.local);
+  if (!local.length) { localStorage.removeItem("me-hidden"); return; }
+  if (!localStorage.getItem("owner-key")) return;   // перенесётся, когда владелец введёт пароль
+  try {
+    let server;
+    for (const [id, m] of local) server = await api("/me", { fantlab: +id, v: m.v, title: m.title });
+    localStorage.removeItem("me-hidden");
+    setMarks(server);
+    renderMe();
+  } catch { /* попробуем при следующем открытии */ }
+}
+async function markRec(r, v) {
+  const was = state.marks[r.fantlab], next = was && was.v === v ? null : v;   // повторное нажатие снимает отметку
+  if (was && was.local) { const h = localHidden(); delete h[r.fantlab]; localStorage.setItem("me-hidden", JSON.stringify(h)); }
+  const body = { fantlab: r.fantlab, v: next, title: r.title, authors: r.authors, image: r.image || null, from: (r.friends || [])[0]?.from };
+  if (next) state.marks[r.fantlab] = { ...body, date: new Date().toISOString().slice(0, 10) }; else delete state.marks[r.fantlab];
   renderMe();
+  try { setMarks(await ownerApi("/me", body)); renderMe(); migrateHidden(); }
+  catch (e) {
+    if (was) state.marks[r.fantlab] = was; else delete state.marks[r.fantlab];
+    renderMe();
+    if (!e.silent) alert("Не сохранилось: " + e.message);
+  }
 }
 function recEl(r) {
-  const fl = `https://fantlab.ru/work${r.fantlab}`;
+  const fl = `https://fantlab.ru/work${r.fantlab}`, mark = state.marks[r.fantlab];
   const note = r.continues ? `Цикл «${r.continues}» у вас начат` : r.start ? `Цикл «${r.cycle}» — начать с «${r.start}»` : "";
   return el("div", { class: "book rec" },
     r.image ? el("img", { src: r.image, alt: "", loading: "lazy", referrerpolicy: "no-referrer" })
@@ -425,32 +469,47 @@ function recEl(r) {
       el("div", { class: "a" }, r.authors.join(", "), r.year ? `, ${r.year}` : "", r.type ? ` · ${r.type}` : "",
         r.fl_rating ? ` · FantLab ${r.fl_rating} (${r.fl_voters})` : ""),
       note ? el("div", { class: "ser" }, "📚 ", note) : null,
-      el("div", { class: "s" }, r.description),
+      r.description ? el("div", { class: "s" }, r.description) : null,
       (r.awards || []).length || r.quiz_n ? el("div", { class: "ser" },
         ...(r.awards || []).slice(0, 3).map(x => "🏆 " + x + "  "), r.quiz_n ? `❓ в квизах: ${r.quiz_n}` : "") : null,
-      el("div", { class: "why" }, r.why || r.why_auto || ("Советуют: " + r.seeds.slice(0, 3).join(", ") +
-        (r.near.length ? ". Близко к: " + r.near.slice(0, 3).join(", ") : ""))),
-      state.owner ? el("div", { class: "recbtns" },
-        chip("✓ читал", "", () => hideRec(r, "читал")), chip("✕ не то", "", () => hideRec(r, "не то"))) : null));
+      ...(r.friends || []).filter(f => f.note).map(f => el("div", { class: "friend" }, "💬 ", el("b", {}, f.from), ": ", f.note)),
+      el("div", { class: "why" }, r.why || r.why_auto || ((r.seeds || []).length ? "Советуют: " + r.seeds.slice(0, 3).join(", ") +
+        ((r.near || []).length ? ". Близко к: " + r.near.slice(0, 3).join(", ") : "") : "")),
+      state.owner ? el("div", { class: "recbtns" }, ...Object.entries(MARK_BTN).map(([v, [off, on]]) =>
+        chip(mark && mark.v === v ? on : off, mark && mark.v === v ? "on" : "", () => markRec(r, v)))) : null));
 }
-const ME_SRC = { similar: "📖 похожие на прочитанное", awards: "🏆 премии и списки лучших", quiz: "❓ частые в квизах" };
+const ME_SRC = { similar: "📖 похожие на прочитанное", awards: "🏆 премии и списки лучших", quiz: "❓ частые в квизах", friends: "💬 советуют друзья" };
 function meSources() {
   const saved = JSON.parse(localStorage.getItem("me-src") || "null");
-  return new Set(saved || Object.keys(ME_SRC));
+  // Источник, появившийся позже сохранённого выбора, включён: иначе советы друзей никто не увидит.
+  const seen = JSON.parse(localStorage.getItem("me-src-seen") || '["similar","awards","quiz"]');
+  return new Set(saved ? [...saved, ...Object.keys(ME_SRC).filter(k => !seen.includes(k))] : Object.keys(ME_SRC));
+}
+// План: карточка из me.json, если она там есть, иначе — то, что сохранено вместе с отметкой.
+function planRecs() {
+  const all = new Map([...state.me.fresh, ...state.me.continue, ...(state.me.plan || [])].map(r => [r.fantlab, r]));
+  return Object.entries(state.marks).filter(([, m]) => m.v === "план")
+    .sort((a, b) => (b[1].date || "").localeCompare(a[1].date || ""))
+    .map(([id, m]) => all.get(+id) || { fantlab: +id, title: m.title, authors: m.authors || [], image: m.image,
+      why_auto: m.from ? `Советует ${m.from}.` : null })
+    .filter(r => { const h = shelfMatch(r.title, r.authors[0], r.fantlab); return !(h && h.b); });
 }
 function renderMe() {
-  const h = state.owner ? hidden() : {}, on = meSources();
+  const marks = state.marks, on = meSources();
   document.getElementById("me-src").replaceChildren(...Object.entries(ME_SRC).map(([k, label]) => chip(label, on.has(k) ? "on" : "", () => {
     on.has(k) ? on.delete(k) : on.add(k);
     localStorage.setItem("me-src", JSON.stringify([...on]));
+    localStorage.setItem("me-src-seen", JSON.stringify(Object.keys(ME_SRC)));
     renderMe();
   })));
-  const show = xs => xs.filter(r => !h[r.fantlab]).map(recEl);
+  const plan = planRecs();
+  document.getElementById("me-plan-h").hidden = !plan.length;
+  document.getElementById("me-plan").replaceChildren(...plan.map(recEl));
   // Старый me.json без src — всё считается «похожими».
-  const all = state.me.fresh.filter(r => !h[r.fantlab] && (r.src || ["similar"]).some(x => on.has(x)));
+  const all = state.me.fresh.filter(r => !marks[r.fantlab] && (r.src || ["similar"]).some(x => on.has(x)));
   state.meShown = state.meMore ? state.meShown + 30 : 30;
   state.meMore = false;
-  document.getElementById("me-fresh").replaceChildren(...(all.length ? show(all.slice(0, state.meShown))
+  document.getElementById("me-fresh").replaceChildren(...(all.length ? all.slice(0, state.meShown).map(recEl)
     : [el("div", { class: "count" }, on.size ? "По этим источникам ничего не осталось." : "Включите хотя бы один источник.")]));
   document.getElementById("me-found").textContent = all.length
     ? `Подходит книг: ${all.length}` + (all.length > state.meShown ? ` · показаны первые ${state.meShown}` : "") : "";
@@ -458,12 +517,19 @@ function renderMe() {
   more.hidden = all.length <= state.meShown;
   more.textContent = `Показать ещё ${Math.max(0, Math.min(30, all.length - state.meShown))}`;
   more.onclick = () => { state.meMore = true; renderMe(); };
-  document.getElementById("me-continue").replaceChildren(...show(state.me.continue));
-  const n = Object.keys(h).length;
-  document.getElementById("me-count").replaceChildren(
-    `Похожие — по ${state.me.stats.seeds} прочитанным книгам` +
-      (state.me.stats.awards ? `, непрочитанных лауреатов и книг из списков: ${state.me.stats.awards}, частых в квизах: ${state.me.stats.quiz}.` : "."),
-    n ? [` Скрыто: ${n} · `, el("a", { href: "#", onclick: e => { e.preventDefault(); localStorage.removeItem("me-hidden"); renderMe(); } }, "вернуть")] : "");
+  document.getElementById("me-continue").replaceChildren(...state.me.continue.filter(r => !marks[r.fantlab]).map(recEl));
+  const st = state.me.stats;
+  document.getElementById("me-count").textContent = `Похожие — по ${st.seeds} прочитанным книгам` +
+    (st.awards ? `, непрочитанных лауреатов и книг из списков: ${st.awards}, частых в квизах: ${st.quiz}` : "") +
+    (st.friends ? `, советов друзей: ${st.friends}` : "") + ".";
+  // Скрытое видит только владелец — и может вернуть по одной книге.
+  const gone = Object.entries(marks).filter(([, m]) => m.v !== "план");
+  const box = document.getElementById("me-hidden");
+  box.hidden = !state.owner || !gone.length;
+  box.querySelector("summary").textContent = `Скрыто: ${gone.length}`;
+  box.querySelector("div").replaceChildren(...gone.sort((a, b) => (b[1].date || "").localeCompare(a[1].date || "")).map(([id, m]) =>
+    el("div", { class: "aw-row" }, `«${m.title}»`, (m.authors || []).length ? " — " + m.authors.join(", ") : "",
+      el("span", { class: "meta" }, ` · ${m.v} `), el("a", { href: "#", onclick: e => { e.preventDefault(); markRec({ fantlab: +id, ...m }, m.v); } }, "вернуть"))));
 }
 
 // ---------- премии ----------
@@ -529,6 +595,9 @@ async function openAwards() {
     state.awSection = state.awards[0].section;
     state.awId = state.awards[0].id;
   }
+  const want = state.awards.find(a => a.id === state.awWant);
+  if (want) { state.awId = want.id; state.awSection = want.section; }
+  state.awWant = null;
   renderAwards();
 }
 const showCovers = () => localStorage.getItem("covers") === "1";
@@ -588,6 +657,7 @@ function renderAwards() {
       it.w ? null : el("span", { class: "meta" }, " (номинант)")));
   }
   document.getElementById("aw-items").replaceChildren(...rows);
+  saveHash();
 }
 
 // ---------- предложения друзей ----------
@@ -609,10 +679,27 @@ async function openSuggest() {
         el("div", { class: "a" }, `советует ${x.from}, ${x.date.slice(8, 10)}.${x.date.slice(5, 7)}.${x.date.slice(0, 4)}`),
         x.note ? el("div", { class: "s" }, x.note) : null,
         h && h.b ? el("div", { class: "why" }, "✓ уже на полке", state.owner ? " " + stars(h.b.rating) : "") : null,
-        state.owner ? el("div", { class: "recbtns" }, chip(x.hidden ? "вернуть" : "скрыть", "", async () => {
-          try { await api("/suggest/hide", { id: x.id, hidden: !x.hidden }); openSuggest(); } catch (e) { alert(e.message); }
-        })) : null));
+        sgStatusEl(x),
+        state.owner ? el("div", { class: "recbtns" },
+          ...Object.entries(MARK_BTN).map(([v, [off, on]]) => chip(sgStatus(x) === v ? on : off, sgStatus(x) === v ? "on" : "",
+            () => sgOwner("/suggest/status", { id: x.id, v: sgStatus(x) === v ? null : v }))),
+          chip(x.hidden ? "вернуть" : "скрыть", "", () => sgOwner("/suggest/hide", { id: x.id, hidden: !x.hidden }))) : null));
   }) : [el("div", { class: "count" }, "Пока никто ничего не посоветовал — будьте первым.")]));
+}
+// Ответ владельца на совет: «не то» видит только он сам — другу незачем это читать.
+const sgStatus = x => x.status !== undefined ? x.status : (x.fantlab && state.marks[x.fantlab] || {}).v || null;
+function sgStatusEl(x) {
+  const v = sgStatus(x);
+  const text = v === "план" ? "★ хозяин взял в план" : v === "читал" ? "✓ хозяин уже прочитал" : v === "не то" && state.owner ? "✕ не то" : null;
+  return text ? el("div", { class: "why" }, text) : null;
+}
+async function sgOwner(path, body) {
+  try {
+    await ownerApi(path, body);
+    setMarks(await api("/me"));
+    openSuggest();
+    if (state.me) renderMe();
+  } catch (e) { if (!e.silent) alert("Не сохранилось: " + e.message); }
 }
 let sgTimer, sgPicked = null;
 document.getElementById("sg-search").addEventListener("input", e => {
@@ -737,11 +824,308 @@ function renderQuizRead() {
 document.getElementById("qz-mode-train").addEventListener("click", e => {
   e.target.classList.add("on"); document.getElementById("qz-mode-read").classList.remove("on");
   document.getElementById("qz-train").hidden = false; document.getElementById("qz-read").hidden = true;
+  saveHash();
 });
 document.getElementById("qz-mode-read").addEventListener("click", e => {
   e.target.classList.add("on"); document.getElementById("qz-mode-train").classList.remove("on");
   document.getElementById("qz-train").hidden = true; document.getElementById("qz-read").hidden = false; renderQuizRead();
+  saveHash();
 });
+
+// ---------- статистика ----------
+// Даты прочтения точны с 2013 года; 2006–2012 записаны по памяти; до 2006-го — школьные годы, книги
+// попали на полку почти случайно. Эпохи видны на графике, а вкус по годам считается с 2006-го.
+const EPOCHS = [
+  { key: "school", to: 2005, name: "Школьная пора", span: "до 2006",
+    note: "Книги тех лет легли на полку, как листья в гербарий, — какие попались под руку. Это не летопись, а пара засушенных цветков: ими любуются, по ним не делают выводов." },
+  { key: "memory", to: 2012, name: "По памяти", span: "2006–2012",
+    note: "Книга помнится, а год — приблизительно: где-то рядом, плюс-минус одно лето." },
+  { key: "diary", to: 9999, name: "Дневник", span: "с 2013",
+    note: "Каждая книга записана по горячим следам — здесь цифрам можно верить." },
+];
+const epochOf = y => EPOCHS.find(e => y <= e.to);
+const MONTHS = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"];
+const plural = (n, one, few, many) => {
+  const m10 = n % 10, m100 = n % 100;
+  return `${n} ${m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many}`;
+};
+const books = n => plural(n, "книга", "книги", "книг");
+const pct = (a, b) => b ? Math.round(100 * a / b) : 0;
+const readYear = b => b.read ? +b.read.slice(0, 4) : null;
+const shortYear = y => "’" + String(y).slice(2);
+const dec1 = v => v.toFixed(1).replace(".", ",");
+
+// Подсказка на столбике или клетке: значение — крупно, подпись — ниже. То же — с клавиатуры.
+function tipEl() {
+  let t = document.getElementById("tip");
+  if (!t) { t = el("div", { id: "tip", class: "tip", role: "tooltip", hidden: "" }); document.body.append(t); }
+  return t;
+}
+function withTip(node, lines) {
+  node.tabIndex = 0;
+  node.setAttribute("aria-label", lines.join(". "));
+  const show = e => {
+    const t = tipEl(), r = node.getBoundingClientRect();
+    t.replaceChildren(el("b", {}, lines[0]), ...lines.slice(1).map(x => el("div", {}, x)));
+    t.hidden = false;
+    const x = e && e.clientX ? e.clientX : r.left + r.width / 2, y = e && e.clientY ? e.clientY : r.top;
+    t.style.left = Math.min(innerWidth - t.offsetWidth - 8, Math.max(8, x - t.offsetWidth / 2)) + "px";
+    t.style.top = (y - t.offsetHeight - 14 < 8 ? y + 18 : y - t.offsetHeight - 14) + "px";
+  };
+  const hide = () => { tipEl().hidden = true; };
+  node.addEventListener("pointermove", show); node.addEventListener("focus", () => show());
+  node.addEventListener("pointerleave", hide); node.addEventListener("blur", hide);
+  return node;
+}
+function niceTicks(max) {
+  const raw = max / 4, p = 10 ** Math.floor(Math.log10(raw || 1)), step = [1, 2, 5, 10].map(m => m * p).find(s => s >= raw);
+  const out = [0];
+  while (out[out.length - 1] < max) out.push(out[out.length - 1] + step);
+  return out;
+}
+// Столбики: подпись значения — только у отмеченных (максимум, текущий год), остальное — в подсказке и таблице.
+function columns(items, opts = {}) {
+  const ticks = niceTicks(Math.max(...items.map(x => x.v), 1)), top = ticks[ticks.length - 1];
+  return el("div", { class: "cc" + (opts.cls ? " " + opts.cls : "") },
+    el("div", { class: "cc-grid" }, ...ticks.map(t => el("div", { class: "cc-tick", style: `bottom:${100 * t / top}%` }, el("span", {}, t)))),
+    el("div", { class: "cc-cols" }, ...items.map(x => withTip(el("div", {
+      class: "cc-col" + (x.sel ? " sel" : "") + (opts.onclick ? " click" : ""), onclick: opts.onclick ? () => opts.onclick(x) : null },
+      x.label_v ? el("span", { class: "cc-val", style: `bottom:${100 * x.v / top}%` }, x.v) : null,
+      el("div", { class: "cc-bar " + (x.cls || ""), style: `height:${100 * x.v / top}%` }),
+      el("span", { class: "cc-x" }, x.axis || "")), x.tip))));
+}
+function hbars(items, onclick) {
+  const max = Math.max(...items.map(x => x.v), 1);
+  return el("div", { class: "hb" }, ...items.map(x => withTip(el("div", { class: "hb-row" + (onclick ? " click" : ""), onclick: onclick ? () => onclick(x) : null },
+    el("span", { class: "hb-l" }, x.label),
+    el("span", { class: "hb-track" }, el("span", { class: "hb-bar", style: `width:${100 * x.v / max}%` }), el("span", { class: "hb-v" }, x.v))),
+    x.tip)));
+}
+// Тепловая карта — обычная таблица: значения лежат в ячейках текстом для экранных читалок, цвет — одна шкала.
+function heat(rows, cols, val, fmt, tip) {
+  let max = 0;
+  for (const r of rows) for (const c of cols) max = Math.max(max, val(r, c) || 0);
+  return el("div", { class: "heat-wrap" }, el("table", { class: "heat" },
+    el("thead", {}, el("tr", {}, el("th", {}), ...cols.map(c => el("th", { scope: "col", title: c.title }, c.label)))),
+    el("tbody", {}, ...rows.map(r => el("tr", {}, el("th", { scope: "row" }, r.label), ...cols.map(c => {
+      const v = val(r, c);
+      return withTip(el("td", { style: `background:color-mix(in srgb, var(--accent) ${Math.round(4 + 96 * v / (max || 1))}%, var(--card))` },
+        el("span", { class: "sr" }, fmt(v))), [fmt(v), ...tip(r, c)]);
+    }))))));
+}
+function statTile(label, value, sub) {
+  return el("div", { class: "tile-stat" }, el("div", { class: "ts-l" }, label), el("div", { class: "ts-v" }, value), sub ? el("div", { class: "ts-s" }, sub) : null);
+}
+function goPick(fill) {
+  document.getElementById("ask").value = "";
+  state.pick = emptyFilter(); fill(state.pick);
+  showTab("pick"); syncAndRender(); window.scrollTo(0, 0);
+}
+
+function renderStats() {
+  const lib = state.lib, box = document.getElementById("stats");
+  const now = new Date(), curY = now.getFullYear(), curM = now.getMonth() + 1;
+  const dated = lib.filter(b => readYear(b));
+  const byYear = new Map();
+  for (const b of dated) { const y = readYear(b); if (!byYear.has(y)) byYear.set(y, []); byYear.get(y).push(b); }
+  const y0 = Math.min(...byYear.keys()), y1 = Math.max(curY, ...byYear.keys());
+  const years = []; for (let y = y0; y <= y1; y++) years.push(y);
+  const authors = new Set(lib.flatMap(b => b.authors));
+  const rated = lib.filter(b => b.rating);
+  const avg = rated.reduce((s, b) => s + b.rating, 0) / (rated.length || 1);
+  const favN = lib.filter(b => b.fav).length;
+  const thisYear = (byYear.get(curY) || []).length;
+  const lastSame = (byYear.get(curY - 1) || []).filter(b => +b.read.slice(5, 7) <= curM).length;
+  const diary = dated.filter(b => readYear(b) >= 2013);
+  const perYear = diary.length / (curY - 2013 + curM / 12);
+
+  // Книги по годам: эпохи различаются заливкой, легенда — карточки эпох под графиком.
+  const max = Math.max(...years.map(y => (byYear.get(y) || []).length));
+  const yearCols = columns(years.map(y => {
+    const bs = byYear.get(y) || [], ep = epochOf(y), fav = bs.filter(b => b.fav).length;
+    const r = bs.filter(b => b.rating), a = r.reduce((s, b) => s + b.rating, 0) / (r.length || 1);
+    return { y, v: bs.length, cls: ep.key, sel: state.stYear === y, label_v: bs.length === max || y === curY,
+      axis: y === y0 ? y : (y % 5 === 0 && y - y0 >= 3) || y === y1 ? shortYear(y) : "",
+      tip: [books(bs.length), `${y} · ${ep.name.toLowerCase()}`, bs.length ? `средняя оценка ${dec1(a)}${fav ? ` · ❤ ${fav}` : ""}` : ""].filter(Boolean) };
+  }), { onclick: x => { state.stYear = state.stYear === x.y ? null : x.y; renderStats(); saveHash(); } });
+
+  // Месяцы — только по дневнику: раньше месяц прочтения не записывался.
+  const byMonth = MONTHS.map(() => 0);
+  for (const b of diary) byMonth[+b.read.slice(5, 7) - 1]++;
+  const mMax = Math.max(...byMonth);
+  const monthCols = columns(byMonth.map((v, i) => ({ v, axis: MONTHS[i].slice(0, 3), label_v: v === mMax,
+    tip: [books(v), `${MONTHS[i]}, все годы с 2013-го`] })), { cls: "cc-short" });
+
+  // Вкус: «по памяти» одной колонкой, дальше — по годам дневника.
+  const periods = [{ label: "06–12", title: "2006–2012, по памяти", books: dated.filter(b => epochOf(readYear(b)).key === "memory") },
+    ...years.filter(y => y >= 2013).map(y => ({ label: shortYear(y), title: String(y), books: byYear.get(y) || [] }))]
+    .filter(p => p.books.length);
+  const later = periods.flatMap(p => p.books);
+  const top = (key, n) => {
+    const c = new Map();
+    for (const b of later) for (const v of new Set(b[key])) c.set(v, (c.get(v) || 0) + 1);
+    return [...c.entries()].sort((a, b) => b[1] - a[1]).slice(0, n).map(([v]) => ({ key: v, label: v }));
+  };
+  const share = key => (r, c) => pct(c.books.filter(b => b[key].includes(r.key)).length, c.books.length);
+  const ofBooks = (r, c) => [`${r.label} · ${c.title}`, `доля от ${books(c.books.length)}`];
+  const HEAT = {
+    genres: ["Жанры", () => heat(top("genres", 10), periods, share("genres"), v => v + "%", ofBooks)],
+    scales: ["Настроение", () => heat(Object.entries(SCALES).map(([k, label]) => ({ key: k, label })), periods,
+      (r, c) => c.books.reduce((s, b) => s + (b.scales[r.key] || 0), 0) / c.books.length, dec1,
+      (r, c) => [`${r.label} · ${c.title}`, "в среднем по шкале от 0 до 3"])],
+    regions: ["Где происходит", () => heat(top("regions", 10), periods, share("regions"), v => v + "%", ofBooks)],
+  };
+  const hm = HEAT[state.stHeat] ? state.stHeat : "genres";
+
+  const decade = y => y < 1800 ? "до 1800" : y < 1900 ? "XIX век" : `${Math.floor(y / 10) * 10}-е`;
+  const decOrder = ["до 1800", "XIX век", ...Array.from({ length: 13 }, (_, i) => `${1900 + 10 * i}-е`)];
+  const byDec = new Map();
+  for (const b of lib) if (b.year) byDec.set(decade(b.year), (byDec.get(decade(b.year)) || 0) + 1);
+  const decs = decOrder.filter(d => byDec.has(d)), dMax = Math.max(...byDec.values());
+  const decCols = columns(decs.map((d, i) => ({ v: byDec.get(d), label_v: byDec.get(d) === dMax,
+    axis: i === decs.length - 1 || /^(1900|1950|2000)/.test(d) ? d.replace(/0-е$/, "0") : d === "XIX век" ? "XIX" : "",
+    tip: [books(byDec.get(d)), "написаны: " + d] })), { cls: "cc-short" });
+
+  const count = key => { const c = new Map(); for (const b of lib) for (const v of [].concat(b[key] || [])) c.set(v, (c.get(v) || 0) + 1); return c; };
+  const regions = [...count("regions").entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+  const forms = [...count("form").entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const ratings = [5, 4, 3, 2, 1].map(r => [r, rated.filter(b => b.rating === r).length]).filter(([, n]) => n);
+
+  const sel = state.stYear && byYear.has(state.stYear) ? state.stYear : null;
+  const card = (title, sub, ...kids) => el("section", { class: "st-card" }, el("h3", {}, title), sub ? el("div", { class: "meta" }, sub) : null, ...kids);
+  box.replaceChildren(...[
+    el("div", { class: "st-tiles" },
+      statTile("Прочитано", books(lib.length), plural(authors.size, "автор", "автора", "авторов")),
+      statTile(`В ${curY} году`, books(thisYear), `за то же время в ${curY - 1}-м — ${lastSame}`),
+      statTile("В среднем за год", "≈ " + Math.round(perYear), "по дневнику, с 2013-го"),
+      statTile("Средняя оценка", avg.toFixed(2).replace(".", ","), `пятёрок — ${pct(rated.filter(b => b.rating === 5).length, rated.length)}%`),
+      statTile("Любимых", "❤ " + favN, `${pct(favN, lib.length)}% полки`)),
+    card("Книги по годам", "Нажмите на год — покажу, что тогда читалось.", yearCols,
+      el("div", { class: "epochs" }, ...EPOCHS.map(e => el("div", { class: "epoch" },
+        el("div", { class: "epoch-h" }, el("span", { class: "swatch " + e.key }), el("b", {}, e.name), el("span", { class: "meta" }, " · " + e.span)),
+        el("p", {}, e.note)))),
+      el("details", { class: "st-table" }, el("summary", {}, "Таблицей"),
+        el("table", {}, el("tbody", {}, ...years.filter(y => byYear.has(y)).map(y => el("tr", {}, el("th", {}, y), el("td", {}, byYear.get(y).length))))))),
+    sel ? el("section", { class: "st-card", id: "st-year" }, el("h3", {}, `${sel} — ${books(byYear.get(sel).length)} `,
+        el("button", { class: "link", onclick: () => { state.stYear = null; renderStats(); saveHash(); } }, "✕ свернуть")),
+      el("div", { id: "st-year-list", class: "list" })) : null,
+    el("div", { class: "st-grid" },
+      card("Когда читается", "По месяцам, все годы дневника вместе.", monthCols),
+      card("Когда написано", "Год написания прочитанных книг.", decCols)),
+    card("Как менялся вкус", "С 2006-го — школьные годы не в счёт. Чем гуще цвет клетки, тем больше.",
+      el("div", { class: "chips" }, ...Object.entries(HEAT).map(([k, [label]]) => chip(label, k === hm ? "on" : "", () => { state.stHeat = k; renderStats(); }))),
+      HEAT[hm][1]()),
+    el("div", { class: "st-grid" },
+      card("Где происходит", "Нажмите — подберу книги оттуда.", hbars(regions.map(([v, n]) => ({ key: v, label: v, v: n, tip: [books(n), v] })),
+        x => goPick(f => f.places.add(x.key)))),
+      card("Что за книги", "", hbars(forms.map(([v, n]) => ({ label: v, v: n, tip: [books(n), v] }))),
+        el("h3", {}, "Оценки"), hbars(ratings.map(([r, n]) => ({ label: el("span", { class: "stars" }, stars(r)), v: n, tip: [books(n), `оценка ${r}`] })))))].filter(Boolean));
+  if (sel) renderList("st-year-list", [...byYear.get(sel)].sort((a, b) => b.read.localeCompare(a.read)));
+}
+
+// ---------- ссылки ----------
+// Вид страницы живёт в адресе после #: им можно поделиться. Режим владельца (?me) в ссылку не попадает.
+// Фильтры «Подобрать» пишутся, только если их не восстановить из текста запроса: так ссылка короче.
+function filterParams(f) {
+  const p = new URLSearchParams();
+  for (const [k, set] of [["g", f.genres], ["x", f.warn], ["a", f.audience], ["l", f.length], ["p", f.places], ["e", f.eras], ["t", f.themes], ["w", f.words]])
+    for (const v of set) p.append(k, v);
+  for (const [k, v] of Object.entries(f.scales)) p.append("s", k + (v > 0 ? "+" : "-"));
+  if (f.fav) p.set("fav", "1");
+  return p;
+}
+function hashFor() {
+  const tab = (document.querySelector("nav button.active") || {}).dataset?.tab || "pick";
+  let p = new URLSearchParams();
+  if (tab === "pick") {
+    const q = document.getElementById("ask").value.trim(), fp = filterParams(state.pick);
+    if (fp.toString() !== filterParams(parseAsk(q)).toString()) p = fp;
+    if (q) p.set("q", q);
+  } else if (tab === "like") state.like.forEach(x => p.append(x.ext ? "f" : "b", x.key.slice(1)));
+  else if (tab === "all") {
+    const q = document.getElementById("all-search").value.trim(), s = document.getElementById("all-sort").value;
+    if (q) p.set("q", q);
+    if (s !== "read") p.set("sort", s);
+  } else if (tab === "awards" && state.awId) p.set("id", state.awId);
+  else if (tab === "stats" && state.stYear) p.set("y", state.stYear);
+  else if (tab === "quiz" && !document.getElementById("qz-read").hidden) p.set("mode", "read");
+  if (state.cardId) p.set("book", state.cardId);
+  const s = p.toString().replace(/\+/g, "%20");   // пробел — %20: так ссылка читается и в мессенджере
+  return "#" + tab + (s ? "?" + s : "");
+}
+let hashTimer;
+function saveHash() {
+  if (!state.hashReady) return;   // пока не прочитан адрес, с которым открыли страницу, — не затирать его
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => history.replaceState(null, "", hashFor()), 150);
+}
+async function applyHash() {
+  const m = location.hash.match(/^#([a-z]+)(?:\?(.*))?$/);
+  if (!m) return;
+  const tab = m[1], p = new URLSearchParams(m[2] || "");
+  const btn = document.querySelector(`nav button[data-tab="${tab}"]`);
+  if (!btn || btn.hidden) return;
+  if (tab === "pick") {
+    const q = p.get("q") || "";
+    document.getElementById("ask").value = q;
+    if (["g", "x", "a", "l", "p", "e", "t", "w", "s", "fav"].some(k => p.has(k))) {
+      const f = emptyFilter();
+      for (const [k, set] of [["g", f.genres], ["x", f.warn], ["a", f.audience], ["l", f.length], ["p", f.places], ["e", f.eras], ["t", f.themes]])
+        p.getAll(k).forEach(v => set.add(v));
+      for (const s of p.getAll("s")) if (SCALES[s.slice(0, -1)]) f.scales[s.slice(0, -1)] = s.endsWith("+") ? 1 : -1;
+      f.words = p.getAll("w");
+      f.fav = p.get("fav") === "1";
+      state.pick = f;
+    } else state.pick = parseAsk(q);
+    syncAndRender();
+  } else if (tab === "like") {
+    state.like = [];
+    for (const id of p.getAll("b")) { const b = state.lib.find(x => x.id === +id); if (b) addLibraryLike(b); }
+    for (const id of p.getAll("f")) if (+id) addExternalLike({ work_id: +id });
+  } else if (tab === "all") {
+    document.getElementById("all-search").value = p.get("q") || "";
+    if (ALL_SORT[p.get("sort")]) document.getElementById("all-sort").value = p.get("sort");
+    renderAll();
+  } else if (tab === "awards") state.awWant = +p.get("id") || null;
+  else if (tab === "stats") state.stYear = +p.get("y") || null;
+  await showTab(tab);
+  if (tab === "quiz" && p.get("mode") === "read") document.getElementById("qz-mode-read").click();
+  const book = state.lib.find(x => x.id === +p.get("book"));
+  if (book) openCard(book);
+}
+function toast(text) {
+  const t = el("div", { class: "toast", role: "status" }, text);
+  document.body.append(t);
+  setTimeout(() => t.remove(), 2200);
+}
+async function shareLink(url) {
+  if (navigator.share && matchMedia("(pointer: coarse)").matches) {
+    try { await navigator.share({ title: document.title, url }); } catch { /* закрыли окно — ничего страшного */ }
+    return;
+  }
+  try { await navigator.clipboard.writeText(url); toast("Ссылка скопирована"); }
+  catch { prompt("Ссылка:", url); }
+}
+// ---------- тема ----------
+// Пока не нажимали — как в системе; после нажатия выбор запоминается на этом устройстве.
+const darkNow = () => (document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")) === "dark";
+function paintTheme() {
+  const dark = darkNow(), btn = document.getElementById("theme");
+  btn.textContent = dark ? "☀️" : "🌙";
+  btn.title = dark ? "Светлая тема" : "Тёмная тема";
+  document.querySelector('meta[name="theme-color"]').content = dark ? "#16181b" : "#2f5d8a";
+}
+document.getElementById("theme").addEventListener("click", () => {
+  const t = darkNow() ? "light" : "dark";
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem("theme", t);
+  paintTheme();
+});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", paintTheme);
+paintTheme();
+
+document.getElementById("share").addEventListener("click", () => shareLink(location.origin + location.pathname + hashFor()));
+window.addEventListener("hashchange", () => { if (location.hash !== hashFor()) applyHash(); });
 
 // ---------- циклы ----------
 function seriesLabel(b) {
@@ -754,7 +1138,7 @@ function seriesBooks(name) {
 }
 function showSeries(name) {
   document.getElementById("card").close();
-  document.querySelector('nav button[data-tab="all"]').click();
+  showTab("all");
   const inp = document.getElementById("all-search");
   inp.value = name;
   renderAll();
@@ -834,19 +1218,11 @@ function renderFavAuthors() {
       el("span", { class: "meta" }, " — " + fmt(x))))))));
 }
 async function toggleFav(b) {
-  if (!localStorage.getItem("owner-key")) {
-    const k = prompt("Пароль владельца (запомнится в этом браузере):");
-    if (!k) return;
-    localStorage.setItem("owner-key", k);
-  }
   try {
-    await api("/fav", { id: b.id, on: !b.fav });
+    await ownerApi("/fav", { id: b.id, on: !b.fav });
     b.fav = !b.fav;
     renderFav(); renderPick(); openCard(b);
-  } catch (e) {
-    if (e.status === 401) localStorage.removeItem("owner-key");
-    alert("Не сохранилось: " + e.message);
-  }
+  } catch (e) { if (!e.silent) alert("Не сохранилось: " + e.message); }
 }
 
 function openCard(b) {
@@ -877,19 +1253,25 @@ function openCard(b) {
     b.contains ? el("p", { class: "contains" }, "Внутри: ", b.contains.join(", ")) : null,
     b.series ? seriesBlock(b) : null,
     el("p", { class: "meta" }, el("a", { href: `https://bookmix.ru/book.phtml?id=${b.id}`, target: "_blank", rel: "noopener" }, "на BookMix"),
-      b.fantlab ? [" · ", el("a", { href: `https://fantlab.ru/work${b.fantlab}`, target: "_blank", rel: "noopener" }, "на FantLab")] : null)));
-  dlg.showModal();
+      b.fantlab ? [" · ", el("a", { href: `https://fantlab.ru/work${b.fantlab}`, target: "_blank", rel: "noopener" }, "на FantLab")] : null,
+      " · ", el("a", { href: "#", onclick: e => { e.preventDefault(); shareLink(location.origin + location.pathname + hashFor()); } }, "🔗 ссылка на книгу"))));
+  state.cardId = b.id;
+  saveHash();
+  if (!dlg.open) dlg.showModal();
 }
 
 // ---------- события ----------
-document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => {
+async function showTab(tab) {
   document.querySelectorAll("nav button, .tab").forEach(x => x.classList.remove("active"));
-  btn.classList.add("active");
-  document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
-  if (btn.dataset.tab === "awards") openAwards();
-  if (btn.dataset.tab === "suggest") openSuggest();
-  if (btn.dataset.tab === "quiz") openQuiz();
-}));
+  document.querySelector(`nav button[data-tab="${tab}"]`).classList.add("active");
+  document.getElementById("tab-" + tab).classList.add("active");
+  saveHash();
+  if (tab === "awards") await openAwards();
+  if (tab === "suggest") await openSuggest();
+  if (tab === "quiz") await openQuiz();
+  if (tab === "stats") renderStats();
+}
+document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => showTab(btn.dataset.tab)));
 let askTimer;
 document.getElementById("ask").addEventListener("input", e => {
   clearTimeout(askTimer);
@@ -928,6 +1310,13 @@ document.getElementById("like-search").addEventListener("keydown", e => {
   if (e.key === "Enter") { const first = document.querySelector("#like-suggest div[onclick], #like-suggest div:not(.fl)"); if (first) first.click(); }
 });
 document.getElementById("card").addEventListener("click", e => { if (e.target.id === "card") e.target.close(); });
+document.getElementById("card").addEventListener("close", () => { state.cardId = null; saveHash(); });
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js");
+// Приложение на телефоне (PWA) iOS держит в памяти днями, и свежая версия видна только после перезапуска.
+// Вернулись спустя полдня — страница перечитывается с сервера; вид сохраняется в адресе.
+const loadedAt = Date.now();
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && Date.now() - loadedAt > 6 * 3600e3) location.reload();
+});
 load();
