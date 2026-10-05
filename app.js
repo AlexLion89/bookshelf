@@ -101,14 +101,42 @@ const el = (tag, attrs = {}, ...kids) => {
   return e;
 };
 
+// Режим владельца: адрес с ?me или вход по паролю (ссылка внизу страницы) — дальше его помнит устройство.
+// Сайт с домашнего экрана iPhone открывается без ?me и хранит данные отдельно от Safari — ему нужен вход.
+async function ownerLogin() {
+  const k = prompt("Пароль владельца (запомнится на этом устройстве):");
+  if (!k) return;
+  localStorage.setItem("owner-key", k);
+  let ok = false;
+  // Worker сверяет пароль раньше данных: пустой запрос с верным паролем — 400, с неверным — 401. Ничего не пишется.
+  try { await api("/me", { fantlab: null }); ok = true; } catch (e) {
+    ok = e.status === 400;
+    if (!ok) alert(e.status === 401 ? "Пароль не подошёл." : "Не удалось проверить пароль: " + e.message);
+  }
+  if (!ok) { localStorage.removeItem("owner-key"); return; }
+  localStorage.setItem("owner", "1");
+  location.reload();
+}
+function ownerLogout() {
+  localStorage.removeItem("owner");
+  localStorage.removeItem("owner-key");
+  location.replace(location.pathname + location.hash);   // без ?me — иначе режим включится снова
+}
+
 async function load() {
-  const owner = new URLSearchParams(location.search).has("me");
+  if (new URLSearchParams(location.search).has("me")) localStorage.setItem("owner", "1");
+  const owner = localStorage.getItem("owner") === "1";
   let url = "data/library.json";
   if (owner) {
+    document.getElementById("owner-badge").hidden = false;
+    // Полная база есть только локально; на сайте — публичная.
     const r = await fetch("data/library.private.json").catch(() => null);
-    if (r && r.ok) { state.lib = await r.json(); document.getElementById("owner-badge").hidden = false; }
+    if (r && r.ok) state.lib = await r.json();
   }
   state.owner = owner;
+  document.getElementById("owner-link").replaceChildren(el("a", { href: "#", onclick: e => {
+    e.preventDefault(); owner ? ownerLogout() : ownerLogin();
+  } }, owner ? "Выйти из режима владельца" : "Я хозяин полки"));
   const marks = api("/me").catch(() => ({}));
   const m = await fetch("data/me.json").catch(() => null);
   if (m && m.ok) {
