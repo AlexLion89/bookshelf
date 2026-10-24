@@ -139,10 +139,9 @@
   <section id="tab-me" class="tab">
     <!-- Владелец знает, как это устроено, — ему пояснение свёрнуто; гостю видно сразу (summary прячется). -->
     <details id="me-how" class="how" open><summary>Как это работает</summary>
-    <p class="hint" id="me-hint">Непрочитанное из четырёх источников — похожие на ваши пятёрки, лауреаты премий и списков лучших, частые в квизах, советы друзей — по близости к вашему вкусу. Источники можно включать и выключать.
-      «★ в план» откладывает книгу наверх, «✓ читал» и «✕ не то» прячут её. Отметки хранятся на сервере — видны с любого устройства и учитываются при пересчёте.</p></details>
-    <div id="me-src" class="chips"></div>
-    <div id="me-count" class="count"></div>
+    <p class="hint" id="me-hint">Рекомендации — непрочитанное из четырёх источников: похожие на ваши пятёрки, лауреаты премий и списков лучших, частые в квизах, советы друзей; сверху — ближе к вашему вкусу. Кнопки над списком показывают книги одного источника.
+      «★ в план» откладывает книгу наверх, «✓ читал» и «✕ не то» прячут её. Отметки хранятся на сервере — видны с любого устройства и учитываются при пересчёте.</p>
+    <div id="me-count" class="count"></div></details>
     <div id="me-add" class="me-add" hidden>
       <input id="me-add-search" type="search" placeholder="Отметить другую книгу: «читаю» или «в план» — название или автор…" autocomplete="off">
       <div id="me-add-suggest" class="suggest"></div>
@@ -151,7 +150,9 @@
     <div id="me-reading" class="list"></div>
     <h3 id="me-plan-h" hidden>В планах</h3>
     <div id="me-plan"></div>
-    <h3>Новое</h3>
+    <h3 id="me-fresh-h">Рекомендации</h3>
+    <!-- Фильтр — прямо над списком, который он фильтрует: один источник или все. -->
+    <div id="me-src" class="chips scroll-row"></div>
     <div id="me-found" class="count"></div>
     <div id="me-fresh" class="list"></div>
     <button id="me-more" class="more" hidden>Показать ещё</button>

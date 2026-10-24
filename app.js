@@ -623,12 +623,20 @@ function recEl(r, full) {
     // Низ — во всю ширину карточки, под обложкой: так «где взять» и кнопки встают в одну строку каждая.
     el("div", { class: "rec-foot" }, whereEl(r.title, r.authors), btns ? el("div", { class: "recbtns" }, ...btns) : null));
 }
-const ME_SRC = { similar: "📖 похожие на прочитанное", awards: "🏆 премии и списки лучших", quiz: "❓ частые в квизах", friends: "💬 советуют друзья" };
-function meSources() {
-  const saved = JSON.parse(localStorage.getItem("me-src") || "null");
-  // Источник, появившийся позже сохранённого выбора, включён: иначе советы друзей никто не увидит.
-  const seen = JSON.parse(localStorage.getItem("me-src-seen") || '["similar","awards","quiz"]');
-  return new Set(saved ? [...saved, ...Object.keys(ME_SRC).filter(k => !seen.includes(k))] : Object.keys(ME_SRC));
+// Фильтр рекомендаций: все или один источник, с числом книг на кнопке. Не запоминается — каждый заход со всех:
+// раньше кнопки выключали источники и выбор хранился на устройстве, и «только друзья» (там пусто — совет уже
+// в плане) оставлял список пустым навсегда; казалось, что рекомендаций нет вовсе.
+const ME_SRC = { similar: "📖 похожие", awards: "🏆 премии и списки", quiz: "❓ квизы", friends: "💬 друзья" };
+const recSrc = r => r.src || ["similar"];   // старый me.json без src — всё «похожее»
+localStorage.removeItem("me-src"); localStorage.removeItem("me-src-seen");   // старый выбор источников больше не нужен
+// Пустой список — объяснить почему, а не просто «ничего нет».
+function meEmptyText(src) {
+  if (!src) return "Всё разобрано — новые рекомендации появятся после следующего обновления.";
+  const seen = new Map([...state.me.fresh, ...(state.me.plan || [])].filter(r => state.marks[r.fantlab] && recSrc(r).includes(src)).map(r => [r.fantlab, r]));
+  const kept = [...seen.values()].filter(r => KEEP.includes(state.marks[r.fantlab].v));
+  return kept.length ? `Новых нет: ${kept.length === 1 ? "эта книга уже" : "эти книги уже"} у вас в планах или читаете — ` +
+    kept.slice(0, 3).map(r => `«${r.title}»`).join(", ") + (kept.length > 3 ? "…" : "") + "."
+    : seen.size ? "Новых нет: всё отсюда вы уже отметили." : "Отсюда сейчас ничего нет.";
 }
 // План и «читаю»: карточка из me.json, если она там есть, иначе — то, что сохранено вместе с отметкой.
 // Книга, появившаяся на полке (прочитана и записана на BookMix), из этих списков уходит сама.
@@ -721,13 +729,15 @@ document.getElementById("me-add-search").addEventListener("input", e => {
 });
 
 function renderMe() {
-  const marks = state.marks, on = meSources();
-  document.getElementById("me-src").replaceChildren(...Object.entries(ME_SRC).map(([k, label]) => chip(label, on.has(k) ? "on" : "", () => {
-    on.has(k) ? on.delete(k) : on.add(k);
-    localStorage.setItem("me-src", JSON.stringify([...on]));
-    localStorage.setItem("me-src-seen", JSON.stringify(Object.keys(ME_SRC)));
-    renderMe();
-  })));
+  const marks = state.marks, src = state.meSrc || null;
+  const unmarked = state.me.fresh.filter(r => !marks[r.fantlab]);
+  const inSrc = k => unmarked.filter(r => recSrc(r).includes(k));
+  const srcBox = document.getElementById("me-src");
+  srcBox.replaceChildren(chip(`Все · ${unmarked.length}`, src ? "" : "on", () => { state.meSrc = null; renderMe(); }),
+    ...Object.entries(ME_SRC).map(([k, label]) => chip(`${label} · ${inSrc(k).length}`, src === k ? "on" : "", () => {
+      state.meSrc = src === k ? null : k; renderMe();   // повторное нажатие — снова все
+    })));
+  scrollToChip(srcBox, srcBox.querySelector(".chip.on"));
   const reading = markedRecs("читаю"), plan = markedRecs("план");
   document.getElementById("me-reading-h").hidden = !reading.length;
   document.getElementById("me-reading").replaceChildren(...reading.map(recEl));
@@ -737,14 +747,12 @@ function renderMe() {
   renderPlan(plan);
   document.getElementById("me-add").hidden = !state.owner;
   renderNowReading();
-  // Старый me.json без src — всё считается «похожими».
-  const all = state.me.fresh.filter(r => !marks[r.fantlab] && (r.src || ["similar"]).some(x => on.has(x)));
+  const all = src ? inSrc(src) : unmarked;
   state.meShown = state.meMore ? state.meShown + 30 : 30;
   state.meMore = false;
   document.getElementById("me-fresh").replaceChildren(...(all.length ? all.slice(0, state.meShown).map(recEl)
-    : [el("div", { class: "count" }, on.size ? "По этим источникам ничего не осталось." : "Включите хотя бы один источник.")]));
-  document.getElementById("me-found").textContent = all.length
-    ? `Подходит книг: ${all.length}` + (all.length > state.meShown ? ` · показаны первые ${state.meShown}` : "") : "";
+    : [el("div", { class: "count" }, meEmptyText(src))]));
+  document.getElementById("me-found").textContent = all.length > state.meShown ? `Показаны первые ${state.meShown} из ${all.length}` : "";
   const more = document.getElementById("me-more");
   more.hidden = all.length <= state.meShown;
   more.textContent = `Показать ещё ${Math.max(0, Math.min(30, all.length - state.meShown))}`;
