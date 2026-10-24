@@ -26,6 +26,7 @@
     <button data-tab="fav">Любимое</button>
     <button data-tab="me" id="me-btn" hidden>Мне почитать</button>
     <button data-tab="picks" id="picks-btn" hidden>Новинки и подборки</button>
+    <button data-tab="dice">🎲 Книга дня</button>
     <button data-tab="stats">Статистика</button>
     <button data-tab="awards">Премии</button>
     <button data-tab="suggest">Предложить книгу</button>
@@ -148,6 +149,23 @@
     <h3>Продолжить начатые циклы</h3>
     <div id="me-continue" class="list"></div>
     <details id="me-hidden" class="me-hidden" hidden><summary></summary><div></div></details>
+  </section>
+
+  <section id="tab-dice" class="tab">
+    <p class="hint" id="dc-hint">Не знаете, что почитать? Сайт выберет книгу на сегодня — из пятёрок хозяина полки, похожих книг и подборок.
+      Выбор запоминается на этом устройстве до завтра. «Ещё вариант» добавит новую книгу, выпавшие раньше останутся ниже.</p>
+    <div id="dc-main" class="dice-main"></div>
+    <button id="dc-roll" class="more">🎲 Ещё вариант</button>
+    <details id="dc-set" class="dice-set"><summary>Откуда выбирать и какое настроение</summary>
+      <div class="dice-set-h">Откуда</div>
+      <div id="dc-src" class="chips"></div>
+      <div class="dice-set-h">Настроение</div>
+      <div id="dc-mood" class="chips"></div>
+      <div id="dc-count" class="count"></div>
+    </details>
+    <h3 id="dc-today-h" hidden>Сегодня уже выпадало</h3>
+    <div id="dc-today" class="list"></div>
+    <details id="dc-before" class="me-hidden" hidden><summary></summary><div></div></details>
   </section>
 
   <section id="tab-picks" class="tab">

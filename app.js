@@ -555,6 +555,7 @@ function markRec(r, v) {
   if (next) state.marks[r.fantlab] = { ...body, date: today() }; else delete state.marks[r.fantlab];
   renderMe();
   if (state.picks) renderPicks();
+  if (document.getElementById("tab-dice").classList.contains("active")) renderDice();
   enqueue("/me", body, "me:" + r.fantlab);
 }
 // Дочитал: полка и оценки живут на BookMix — открыть там поиск книги, чтобы сразу поставить оценку, а здесь
@@ -900,6 +901,147 @@ function renderPicks() {
   document.getElementById("pk-theme-hint").textContent = cur ? cur.hint : "";
   document.getElementById("pk-theme").replaceChildren(...(cur ? pkBooks(cur.ids).map(recEl) : []));
   saveHash();
+}
+
+// ---------- книга дня ----------
+// Одна книга на день: выпавшее помнится, «ещё вариант» добавляет новую, прежние остаются ниже. У гостя журнал
+// живёт на устройстве, у владельца — ещё и на сервере (/dice): одна книга дня на всех его устройствах.
+const DICE_SRC = {   // [подпись для гостя, для владельца]; null — источника нет
+  lib: ["📚 Пятёрки хозяина полки", "📚 Перечитать любимое"],
+  similar: ["📖 Похожее на книги с полки", "📖 Похожее на прочитанное"],
+  awards: ["🏆 Премии и списки лучших"],
+  quiz: ["❓ Частое в квизах"],
+  themes: ["🗂 Из подборок"],
+  new: ["🆕 Новинки"],
+  plan: [null, "★ Из моих планов"],
+};
+const DICE_DEFAULT = { guest: ["lib", "similar", "themes"], owner: ["similar", "awards", "themes", "new"] };
+// Настроение: книги с полки — по шкалам разметки, книги с FantLab — по меткам классификатора.
+const DICE_MOOD = {
+  "": ["любое"],
+  funny: ["смешное", b => b.scales.humor >= 2, ["Юмористическое", "Ироническое", "Сатирическое"]],
+  dark: ["мрачное и страшное", b => b.scales.darkness >= 2, ["Хоррор", "Мистика", "Готика", "Тёмное фэнтези", "Лавкрафт"]],
+  cozy: ["уютное", b => b.scales.cozy >= 2, ["Сказка/Притча", "Семейно-бытовое", "Детская литература"]],
+  page: ["не оторваться", b => b.scales.pageturner >= 3, ["Приключенческое", "Триллер", "Детектив", "Боевик"]],
+  think: ["над чем подумать", b => b.scales.depth >= 3, ["Философское"]],
+  short: ["короткое", b => b.length === "короткая", r => ["повесть", "рассказ"].includes(r.type)],
+  sf: ["фантастика и фэнтези", b => b.scales.fantastic >= 2, ["Фантастика", "Фэнтези", "научная фантастика"]],
+  real: ["без фантастики", b => b.scales.fantastic === 0, ["Реализм"]],
+};
+// День — по часам устройства: today() считает в UTC, и в Москве до трёх ночи книга дня была бы вчерашней.
+const dayKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const diceLog = () => JSON.parse(localStorage.getItem("dice-log") || "[]");
+const saveDiceLog = log => localStorage.setItem("dice-log", JSON.stringify(log.sort((a, b) => a.at - b.at).slice(-60)));
+const diceLabel = k => DICE_SRC[k] && (state.owner ? DICE_SRC[k][1] ?? DICE_SRC[k][0] : DICE_SRC[k][0]);
+function diceSources() {
+  const saved = JSON.parse(localStorage.getItem("dice-src") || "null");
+  return new Set((saved || DICE_DEFAULT[state.owner ? "owner" : "guest"]).filter(diceLabel));
+}
+function recMood(r, mood) {
+  const rule = DICE_MOOD[mood][2];
+  return typeof rule === "function" ? rule(r) : (r.labels || []).some(l => rule.some(w => l.includes(w)));
+}
+function findRec(fl) {
+  const me = state.me || {};
+  return [...(me.fresh || []), ...(me.continue || []), ...(me.plan || [])].find(r => r.fantlab === fl)
+    || (state.picks && state.picks.books[fl]) || markedRecs("план").find(r => r.fantlab === fl);
+}
+function diceCandidates() {
+  const on = diceSources(), mood = localStorage.getItem("dice-mood") || "", out = [], seen = new Set();
+  if (on.has("lib")) {
+    // Гостю — пятёрки и любимое хозяина; владельцу — любимое, прочитанное больше двух лет назад: перечитать.
+    const old = dayKey(new Date(Date.now() - 730 * 864e5)).slice(0, 7);
+    for (const b of state.lib)
+      if ((b.fav || b.rating === 5 || b.shelf === "top") && !(state.owner && (b.read || "9") > old) && (!mood || DICE_MOOD[mood][1](b)))
+        out.push({ s: "lib", id: String(b.id), f: "lib" });
+  }
+  const add = (r, f) => {
+    if (!r || seen.has(r.fantlab)) return;
+    seen.add(r.fantlab);
+    if (f !== "plan" && state.marks[r.fantlab]) return;   // отмеченное — уже не сюрприз
+    if (mood && !recMood(r, mood)) return;
+    const h = shelfMatch(r.title, r.authors[0], r.fantlab);
+    if (!(h && h.b)) out.push({ s: "rec", id: String(r.fantlab), f });
+  };
+  if (state.owner && on.has("plan")) markedRecs("план").forEach(r => add(r, "plan"));
+  const me = state.me || { fresh: [], continue: [] };
+  for (const k of ["similar", "awards", "quiz"])
+    if (on.has(k)) for (const r of [...me.fresh, ...me.continue]) if ((r.src || ["similar"]).includes(k)) add(r, k);
+  if (state.picks) {
+    if (on.has("new")) state.picks.new.forEach(id => add(state.picks.books[id], "new"));
+    if (on.has("themes")) state.picks.themes.forEach(t => t.ids.forEach(id => add(state.picks.books[id], "themes")));
+  }
+  return out;
+}
+// Выпавшее за две недели не повторяется, пока есть из чего выбирать.
+function diceRoll() {
+  const log = diceLog(), since = dayKey(new Date(Date.now() - 14 * 864e5));
+  const recent = new Set(log.filter(x => x.d >= since).map(x => x.s + x.id));
+  let c = diceCandidates();
+  if (!c.length) return null;
+  if (c.some(x => !recent.has(x.s + x.id))) c = c.filter(x => !recent.has(x.s + x.id));
+  const x = { ...c[Math.floor(Math.random() * c.length)], at: Date.now(), d: dayKey() };
+  saveDiceLog([...log, x]);
+  if (state.owner && localStorage.getItem("owner-key")) enqueue("/dice", { items: [x] }, "dice:" + x.at);
+  return x;
+}
+// Владелец: журнал сервера сливается с журналом устройства, а то, чего на сервере нет (бросали без связи
+// или до того, как Worker научился /dice), уходит туда. Старый Worker отвечает 404 — тогда журнал на устройстве.
+async function diceSync() {
+  if (!state.owner || !localStorage.getItem("owner-key")) return;
+  const srv = await api("/dice").catch(() => null);
+  if (!Array.isArray(srv)) return;
+  const have = new Set(srv.map(x => x.at)), mine = diceLog().filter(x => !have.has(x.at));
+  saveDiceLog([...srv, ...mine]);
+  if (mine.length) enqueue("/dice", { items: mine }, "dice:sync");
+}
+const dmy = d => d.split("-").reverse().join(".");
+function diceEl(x) {
+  if (x.s === "lib") {
+    const b = state.lib.find(b => String(b.id) === x.id);
+    return b && libEl(b, b => state.owner ? `Вы читали ${b.read ? dmy(b.read) : "давно"}` : `Хозяин полки поставил ${stars(b.rating)}${b.fav ? " и ❤" : ""}`);
+  }
+  const r = findRec(+x.id);
+  return r && recEl(r);
+}
+async function openDice() {
+  if (!state.picks) { try { state.picks = await (await fetch("data/picks.json")).json(); } catch { /* без подборок и новинок */ } }
+  // С другого устройства сегодня уже могли бросить — сначала спросить сервер, но не дольше нескольких секунд.
+  await Promise.race([diceSync(), new Promise(ok => setTimeout(ok, 4000))]);
+  if (!diceLog().some(x => x.d === dayKey())) diceRoll();
+  renderDice();
+}
+function renderDice() {
+  const on = diceSources(), mood = localStorage.getItem("dice-mood") || "";
+  if (state.owner) document.getElementById("dc-hint").textContent = "Не знаете, что почитать? Сайт выберет книгу на сегодня. " +
+    "Выбор помнится до завтра на всех ваших устройствах. «Ещё вариант» добавит новую книгу, выпавшие раньше останутся ниже.";
+  document.getElementById("dc-src").replaceChildren(...Object.keys(DICE_SRC).filter(diceLabel).map(k => chip(diceLabel(k), on.has(k) ? "on" : "", () => {
+    on.has(k) ? on.delete(k) : on.add(k);
+    localStorage.setItem("dice-src", JSON.stringify([...on]));
+    renderDice();
+  })));
+  document.getElementById("dc-mood").replaceChildren(...Object.entries(DICE_MOOD).map(([k, [label]]) => chip(label, k === mood ? "on" : "", () => {
+    localStorage.setItem("dice-mood", k);
+    renderDice();
+  })));
+  const n = diceCandidates().length, roll = document.getElementById("dc-roll");
+  document.getElementById("dc-count").textContent = n ? `Вариантов при этих настройках: ${n}. Настройки действуют со следующего броска.`
+    : "При этих настройках выбирать не из чего — включите ещё источник или смените настроение.";
+  roll.disabled = !n;
+  roll.onclick = () => { if (diceRoll()) renderDice(); };
+  const log = diceLog().reverse(), day = dayKey(), todays = log.filter(x => x.d === day), main = todays[0];
+  document.getElementById("dc-main").replaceChildren(...(main ? [
+    el("div", { class: "dice-from" }, "Книга дня · выпало из: " + (diceLabel(main.f) || main.f)),
+    diceEl(main) || el("div", { class: "count" }, "Этой книги уже нет в данных сайта — бросьте ещё раз.")]
+    : [el("div", { class: "count" }, n ? "Сегодня ещё ничего не выпало." : "Выбирать не из чего — загляните в настройки ниже.")]));
+  const rest = todays.slice(1).map(diceEl).filter(Boolean);
+  document.getElementById("dc-today-h").hidden = !rest.length;
+  document.getElementById("dc-today").replaceChildren(...rest);
+  const before = log.filter(x => x.d < day), box = document.getElementById("dc-before"), days = [...new Set(before.map(x => x.d))];
+  box.hidden = !before.length;
+  box.querySelector("summary").textContent = `Раньше выпадало: ${before.length}`;
+  box.querySelector("div").replaceChildren(...days.flatMap(d => [el("div", { class: "dice-day" }, dmy(d)),
+    el("div", { class: "list" }, ...before.filter(x => x.d === d).map(diceEl).filter(Boolean))]));
 }
 
 // ---------- предложения друзей ----------
@@ -1559,15 +1701,18 @@ function coverEl(b, cls) {
     el("span", { class: "nct" }, b.title), el("span", { class: "nca" }, b.authors[0] || ""));
 }
 const stars = r => r ? "★".repeat(r) + "☆".repeat(5 - r) : "";
-function renderList(id, books, extra) {
-  document.getElementById(id).replaceChildren(...books.map(b => el("div", { class: "book", onclick: () => openCard(b) },
+function libEl(b, extra) {
+  return el("div", { class: "book", onclick: () => openCard(b) },
     coverEl(b, "thumb"),
     el("div", {},
       el("div", { class: "t" }, b.title),
       el("div", { class: "a" }, b.authors.join(", "), " ", el("span", { class: "stars" }, stars(b.rating)), b.fav ? " ❤" : ""),
       b.series ? el("div", { class: "ser" }, "📚 ", seriesLabel(b)) : null,
       el("div", { class: "s" }, b.summary),
-      extra ? el("div", { class: "why" }, extra(b)) : el("div", { class: "why" }, b.why)))));
+      el("div", { class: "why" }, extra ? extra(b) : b.why)));
+}
+function renderList(id, books, extra) {
+  document.getElementById(id).replaceChildren(...books.map(b => libEl(b, extra)));
 }
 function seriesBlock(b) {
   const books = seriesBooks(b.series.name);
@@ -1670,6 +1815,7 @@ async function showTab(tab) {
   saveHash();
   if (tab === "awards") await openAwards();
   if (tab === "picks") await openPicks();
+  if (tab === "dice") await openDice();
   if (tab === "suggest") await openSuggest();
   if (tab === "quiz") await openQuiz();
   if (tab === "stats") renderStats();
