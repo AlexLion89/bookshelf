@@ -973,14 +973,14 @@ function diceCandidates() {
   }
   return out;
 }
-// Выпавшее за две недели не повторяется, пока есть из чего выбирать.
-function diceRoll() {
+// Выпавшее за две недели не повторяется, пока есть из чего выбирать. auto — бросок при первом заходе за день, а не по кнопке.
+function diceRoll(auto) {
   const log = diceLog(), since = dayKey(new Date(Date.now() - 14 * 864e5));
   const recent = new Set(log.filter(x => x.d >= since).map(x => x.s + x.id));
   let c = diceCandidates();
   if (!c.length) return null;
   if (c.some(x => !recent.has(x.s + x.id))) c = c.filter(x => !recent.has(x.s + x.id));
-  const x = { ...c[Math.floor(Math.random() * c.length)], at: Date.now(), d: dayKey() };
+  const x = { ...c[Math.floor(Math.random() * c.length)], at: Date.now(), d: dayKey(), ...(auto ? { a: 1 } : {}) };
   saveDiceLog([...log, x]);
   if (state.owner && localStorage.getItem("owner-key")) enqueue("/dice", { items: [x] }, "dice:" + x.at);
   return x;
@@ -996,6 +996,13 @@ async function diceSync() {
   if (mine.length) enqueue("/dice", { items: mine }, "dice:sync");
 }
 const dmy = d => d.split("-").reverse().join(".");
+// Что видно из бросков одного дня (свежие сверху): все «ещё вариант» и автоматический бросок, только если он первый за день.
+// Без связи телефон бросает сам, и после встречи с сервером такой бросок не должен перебивать уже выпавшую книгу.
+function diceShown(entries) {
+  const first = entries.reduce((m, x) => (!m || x.at < m.at ? x : m), null);
+  return entries.filter(x => !x.a || x === first).sort((a, b) => b.at - a.at);
+}
+const diceActive = () => document.getElementById("tab-dice").classList.contains("active");
 function diceEl(x) {
   if (x.s === "lib") {
     const b = state.lib.find(b => String(b.id) === x.id);
@@ -1005,11 +1012,17 @@ function diceEl(x) {
   return r && recEl(r);
 }
 async function openDice() {
-  if (!state.picks) { try { state.picks = await (await fetch("data/picks.json")).json(); } catch { /* без подборок и новинок */ } }
-  // С другого устройства сегодня уже могли бросить — сначала спросить сервер, но не дольше нескольких секунд.
-  await Promise.race([diceSync(), new Promise(ok => setTimeout(ok, 4000))]);
-  if (!diceLog().some(x => x.d === dayKey())) diceRoll();
+  state.diceBusy = !diceLog().some(x => x.d === dayKey());
+  renderDice();   // сразу — то, что есть на устройстве
+  const picks = state.picks ? null : fetch("data/picks.json").then(r => r.json()).then(p => { state.picks = p; }).catch(() => {});
+  const sync = diceSync();
+  // С другого устройства сегодня уже могли бросить — ждём сервер, но не дольше четырёх секунд: мобильная связь
+  // до Worker бывает очень медленной. Если он ответит позже, лишний автоматический бросок скроет diceShown.
+  await Promise.race([Promise.all([sync, picks]), new Promise(ok => setTimeout(ok, 4000))]);
+  if (!diceLog().some(x => x.d === dayKey())) diceRoll(true);
+  state.diceBusy = false;
   renderDice();
+  for (const p of [sync, picks]) if (p) p.then(() => { if (diceActive()) renderDice(); });
 }
 function renderDice() {
   const on = diceSources(), mood = localStorage.getItem("dice-mood") || "";
@@ -1029,19 +1042,20 @@ function renderDice() {
     : "При этих настройках выбирать не из чего — включите ещё источник или смените настроение.";
   roll.disabled = !n;
   roll.onclick = () => { if (diceRoll()) renderDice(); };
-  const log = diceLog().reverse(), day = dayKey(), todays = log.filter(x => x.d === day), main = todays[0];
+  const log = diceLog(), day = dayKey(), todays = diceShown(log.filter(x => x.d === day)), main = todays[0];
   document.getElementById("dc-main").replaceChildren(...(main ? [
     el("div", { class: "dice-from" }, "Книга дня · выпало из: " + (diceLabel(main.f) || main.f)),
     diceEl(main) || el("div", { class: "count" }, "Этой книги уже нет в данных сайта — бросьте ещё раз.")]
-    : [el("div", { class: "count" }, n ? "Сегодня ещё ничего не выпало." : "Выбирать не из чего — загляните в настройки ниже.")]));
+    : [el("div", { class: "count" }, state.diceBusy ? "Выбираю книгу дня…" : n ? "Сегодня ещё ничего не выпало." : "Выбирать не из чего — загляните в настройки ниже.")]));
   const rest = todays.slice(1).map(diceEl).filter(Boolean);
   document.getElementById("dc-today-h").hidden = !rest.length;
   document.getElementById("dc-today").replaceChildren(...rest);
-  const before = log.filter(x => x.d < day), box = document.getElementById("dc-before"), days = [...new Set(before.map(x => x.d))];
-  box.hidden = !before.length;
-  box.querySelector("summary").textContent = `Раньше выпадало: ${before.length}`;
-  box.querySelector("div").replaceChildren(...days.flatMap(d => [el("div", { class: "dice-day" }, dmy(d)),
-    el("div", { class: "list" }, ...before.filter(x => x.d === d).map(diceEl).filter(Boolean))]));
+  const days = [...new Set(log.filter(x => x.d < day).map(x => x.d))].sort().reverse(), box = document.getElementById("dc-before");
+  const before = days.map(d => [d, diceShown(log.filter(x => x.d === d))]), total = before.reduce((n, [, xs]) => n + xs.length, 0);
+  box.hidden = !total;
+  box.querySelector("summary").textContent = `Раньше выпадало: ${total}`;
+  box.querySelector("div").replaceChildren(...before.flatMap(([d, xs]) => [el("div", { class: "dice-day" }, dmy(d)),
+    el("div", { class: "list" }, ...xs.map(diceEl).filter(Boolean))]));
 }
 
 // ---------- предложения друзей ----------
@@ -1870,6 +1884,7 @@ document.addEventListener("visibilitychange", () => {
   if (Date.now() - loadedAt > 6 * 3600e3) { location.reload(); return; }
   flushDelay = 3000; flush();
   if (!state.synced && state.hashReady) refreshFromServer();   // при открытии сервер не ответил — догрузить
+  if (state.hashReady && diceActive()) openDice();   // книга дня: с другого устройства могли перебросить
 });
 window.addEventListener("online", () => { flushDelay = 3000; flush(); });
 document.getElementById("pending").addEventListener("click", () => {
