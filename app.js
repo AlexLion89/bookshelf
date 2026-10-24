@@ -682,7 +682,7 @@ function renderPlan(plan) {
     : coverEl({ title: r.title, authors: r.authors }, "tile-img"),
   el("div", { class: "tile-t" }, r.title), el("div", { class: "tile-a" }, r.authors[0] || ""))));
   // Стрелки — для мыши (на телефоне ряд листают пальцем) и только туда, куда ещё есть что листать.
-  const arrow = d => el("button", { class: "shelf-arrow " + (d < 0 ? "prev" : "next"), "aria-label": d < 0 ? "назад" : "дальше",
+  const arrow = d => el("button", { class: "shelf-arrow " + (d < 0 ? "prev" : "next"), "aria-label": d < 0 ? "назад" : "дальше", hidden: "",
     onclick: () => row.scrollBy({ left: d * row.clientWidth * 0.8, behavior: "smooth" }) }, d < 0 ? "‹" : "›");
   const prev = arrow(-1), next = arrow(1);
   const arrows = () => { prev.hidden = row.scrollLeft < 4; next.hidden = row.scrollLeft + row.clientWidth > row.scrollWidth - 4; };
@@ -879,13 +879,19 @@ function coversToggle(id) {
 function renderAwards() {
   const aws = state.awards, sections = [...new Set(aws.map(a => a.section))];
   coversToggle("aw-covers");
-  document.getElementById("aw-sections").replaceChildren(...sections.map(sec => chip(sec, sec === state.awSection ? "on" : "", () => {
+  const secBox = document.getElementById("aw-sections");
+  secBox.replaceChildren(...sections.map(sec => chip(sec, sec === state.awSection ? "on" : "", () => {
     state.awSection = sec; state.awId = aws.find(a => a.section === sec).id; renderAwards();
   })));
-  document.getElementById("aw-list").replaceChildren(...aws.filter(a => a.section === state.awSection).map(a => {
-    const st = awardStats(a);
-    return chip(`${a.name} · ${st.read}/${st.total}`, a.id === state.awId ? "on" : "", () => { state.awId = a.id; renderAwards(); });
-  }));
+  scrollToChip(secBox, secBox.querySelector(".chip.on"));
+  const inSec = aws.filter(a => a.section === state.awSection).map(a => { const st = awardStats(a); return [a, `${a.name} · ${st.read}/${st.total}`]; });
+  document.getElementById("aw-list").replaceChildren(...inSec.map(([a, label]) =>
+    chip(label, a.id === state.awId ? "on" : "", () => { state.awId = a.id; renderAwards(); })));
+  // На телефоне вместо стопки кнопок — выпадающий список (CSS): до 13 премий раздела занимали пол-экрана.
+  const pick = document.getElementById("aw-pick");
+  pick.replaceChildren(...inSec.map(([a, label]) => el("option", { value: a.id }, label)));
+  pick.value = state.awId;
+  pick.onchange = () => { state.awId = +pick.value; renderAwards(); };
   const aw = aws.find(a => a.id === state.awId), only = document.getElementById("aw-unread").checked, covers = showCovers();
   const st = awardStats(aw);
   document.getElementById("aw-count").textContent = `${aw.name} (${aw.country}): ` +
@@ -905,11 +911,15 @@ function renderAwards() {
         { person: !it.t, year: [it.y, it.w ? "" : "номинант"].filter(Boolean).join(" · ") }));
       continue;
     }
-    if (it.y !== year) { year = it.y; rows.push(el("div", { class: "aw-year" }, year || "без года")); }
+    // Премия авторам — один лауреат в год: год в начале строки, а не заголовком над единственной строкой.
+    const inlineYear = aw.by_author && it.y;
+    if (it.y !== year && !inlineYear) rows.push(el("div", { class: "aw-year" }, it.y || "без года"));
+    year = it.y;
     const name = it.t ? `«${it.t}» — ${it.a}` : it.a;
     const link = h && h.b ? el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(h.b); } }, name)
       : flLink ? el("a", { href: flLink, target: "_blank", rel: "noopener" }, name) : name;
     rows.push(el("div", { class: "aw-row" + (h ? " read" : "") },
+      inlineYear ? el("span", { class: "aw-y" }, it.y) : null,
       el("span", { class: "aw-mark" }, h ? (h.b && h.b.fav ? "❤" : "✓") : "·"), link,
       h && h.n ? el("span", { class: "meta" }, ` — у вас книг: ${h.n}`) : null,
       part ? el("span", { class: "meta" }, ` — ${partNote}`) : null,
