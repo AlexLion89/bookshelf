@@ -207,9 +207,10 @@ async function load() {
     if (r && r.ok) state.lib = await r.json();
   }
   state.owner = owner;
-  document.getElementById("owner-link").replaceChildren(el("a", { href: "#", onclick: e => {
-    e.preventDefault(); owner ? ownerLogout() : ownerLogin();
-  } }, owner ? "Выйти из режима владельца" : "Я хозяин полки"));
+  document.getElementById("owner-link").replaceChildren(
+    owner ? el("a", { href: "#", class: "fb-link", onclick: e => { e.preventDefault(); openFeedback(); } }, "🐞 Сообщить о проблеме") : "",
+    owner ? " · " : "",
+    el("a", { href: "#", onclick: e => { e.preventDefault(); owner ? ownerLogout() : ownerLogin(); } }, owner ? "Выйти из режима владельца" : "Я хозяин полки"));
   setMarks({});
   const m = await fetch("data/me.json").catch(() => null);
   if (m && m.ok) {
@@ -2167,7 +2168,10 @@ const navSheet = document.getElementById("nav-sheet");
 document.getElementById("nav-more").addEventListener("click", () => {
   navSheet.replaceChildren(el("div", { class: "sheet-grid" }, ...navButtons().filter(b => !b.hidden && !b.classList.contains("prio")).map(b =>
     el("button", { class: "sheet-btn" + (b.classList.contains("active") ? " on" : ""), type: "button",
-      onclick: () => { navSheet.close(); goTab(b.dataset.tab); } }, el("span", { class: "sheet-i" }, b.dataset.icon), navLabel(b)))));
+      onclick: () => { navSheet.close(); goTab(b.dataset.tab); } }, el("span", { class: "sheet-i" }, b.dataset.icon), navLabel(b))),
+    // Замечание о сайте — владельцу и с телефона: внизу страницы ссылку в дороге не найти.
+    state.owner ? el("button", { class: "sheet-btn fb-btn", type: "button", onclick: () => { navSheet.close(); openFeedback(); } },
+      el("span", { class: "sheet-i" }, "🐞"), "Сообщить о проблеме") : null));
   navSheet.showModal();
   navSheet.focus();   // фокус — на панель, не на первую кнопку: иначе та в рамке и выглядит выбранной
 });
@@ -2236,12 +2240,71 @@ document.getElementById("card").addEventListener("click", e => { if (e.target.id
 document.getElementById("card").addEventListener("close", () => { state.cardId = null; saveHash(); });
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js");
+// ---------- замечания ----------
+// «Багулина в дороге»: владелец пишет замечание прямо с сайта, контекст (вкладка, версия, экран) прикладывается сам.
+// Уходит через очередь записей — переживёт плохую связь. Читает разработчик (GET /feedback без пароля);
+// ответ «сделано» лежит в data/feedback.json и приезжает с выкладкой сайта.
+function feedbackCtx() {
+  const app = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  return [decodeURIComponent(hashFor() || "#pick").slice(0, 120), siteVer, `${innerWidth}×${innerHeight}`, app ? "приложение" : "браузер",
+    (navigator.userAgent.match(/iPhone OS [\d_]+|iPad|Android [\d.]+|Windows NT [\d.]+|Mac OS X [\d_]+/) || [""])[0]].filter(Boolean).join(" · ");
+}
+function sendFeedback(text) {
+  if (!haveKey()) return false;
+  const id = "fb-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  enqueue("/feedback", { id, text, ctx: feedbackCtx(), at: Date.now() }, "fb:" + id);
+  toast("Замечание записано — разберу при следующем обновлении");
+  return true;
+}
+async function openFeedback() {
+  const dlg = document.getElementById("fb");
+  const text = el("textarea", { rows: 4, maxlength: 2000, placeholder: "Что сломалось или неудобно? Например: в «Мне почитать» не нажимается «в план»" });
+  const list = el("div", { class: "fb-list" });
+  dlg.replaceChildren(el("div", { class: "cardbody" }, el("button", { class: "close", onclick: () => dlg.close() }, "×"),
+    el("h2", {}, "🐞 Сообщить о проблеме"),
+    el("p", { class: "meta" }, "Опишите, что случилось. Где вы были — вкладка, версия сайта, экран — добавится само."),
+    text, el("button", { class: "more fb-send", onclick: () => { if (text.value.trim() && sendFeedback(text.value.trim())) dlg.close(); } }, "Отправить"),
+    list));
+  if (!dlg.open) dlg.showModal();
+  const [sent, replies] = await Promise.all([api("/feedback").catch(() => []),
+    fetch("data/feedback.json").then(r => r.ok ? r.json() : {}).catch(() => ({}))]);
+  // Ещё не ушедшие — из очереди, удалённые — убрать сразу, не дожидаясь сервера.
+  const queued = pending().filter(x => x.path === "/feedback").map(x => ({ ...x.body, queued: true }));
+  const gone = new Set(pending().filter(x => x.path === "/feedback/del").map(x => x.body.id));
+  const items = [...queued, ...sent.filter(x => !queued.some(q => q.id === x.id))].filter(x => !gone.has(x.id)).sort((a, b) => b.at - a.at);
+  list.replaceChildren(...(items.length ? [el("h3", {}, "Прежние замечания")] : []), ...items.map(x => {
+    const r = replies[x.id] || {};
+    return el("div", { class: "fb-item" + (r.status === "done" ? " done" : "") },
+      el("div", { class: "meta" }, new Date(x.at).toLocaleDateString("ru-RU", { day: "numeric", month: "long" }), " · ",
+        x.queued ? "⏳ отправляется" : r.status === "done" ? "✅ сделано" : "ждёт разбора"),
+      el("div", {}, x.text), r.reply ? el("div", { class: "why" }, "💬 " + r.reply) : null,
+      el("button", { class: "link", onclick: () => { enqueue("/feedback/del", { id: x.id }, "fbdel:" + x.id); openFeedback(); } }, "удалить"));
+  }));
+}
+
+// ---------- новая версия ----------
+// Каждая выкладка поднимает номер в sw.js. Изменился, пока страница открыта, — плашка «Обновить»: приложение
+// с экрана «Домой» iOS держит в памяти днями, и раньше свежее было видно только после перезапуска.
+let siteVer = "";
+async function checkVersion() {
+  try {
+    const v = ((await (await fetch("sw.js", { cache: "no-store" })).text()).match(/bookshelf-v\d+/) || [])[0];
+    if (!v) return;
+    if (!siteVer) siteVer = v;
+    else if (v !== siteVer) document.getElementById("update-bar").hidden = false;
+  } catch { /* нет связи — проверим в следующий раз */ }
+}
+document.getElementById("update-btn").addEventListener("click", () => location.reload());
+checkVersion();
+setInterval(checkVersion, 20 * 60e3);
+
 // Приложение на телефоне (PWA) iOS держит в памяти днями, и свежая версия видна только после перезапуска.
 // Вернулись спустя полдня — страница перечитывается с сервера; вид сохраняется в адресе.
 const loadedAt = Date.now();
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
   if (Date.now() - loadedAt > 6 * 3600e3) { location.reload(); return; }
+  checkVersion();
   flushDelay = 3000; flush();
   if (!state.synced && state.hashReady) refreshFromServer();   // при открытии сервер не ответил — догрузить
   if (state.hashReady && diceActive()) openDice();   // книга дня: с другого устройства могли перебросить
