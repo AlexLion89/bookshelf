@@ -116,6 +116,9 @@ async function flush() {
     if (e.status === 401) {
       localStorage.removeItem("owner-key");
       alert("Пароль владельца не подошёл — войдите заново (ссылка внизу страницы). Несохранённые отметки подождут.");
+    } else if (e.status === 404) {
+      // Адреса нет — значит, Worker в Cloudflare ещё старый (код вставляют вручную): запись ждёт, а не теряется.
+      flushTimer = setTimeout(flush, 60000);
     } else if (e.status >= 400 && e.status < 500) {
       savePending(pending().filter(y => y !== x && y.key !== x.key));   // сервер такое не примет никогда — не держать
     } else {
@@ -135,8 +138,9 @@ function paintPending() {
 }
 // Свежие отметки и ❤ с сервера; несохранённое из очереди накладывается сверху.
 async function refreshFromServer() {
-  const [m, fav] = await Promise.all([api("/me").catch(() => null), api("/fav").catch(() => null)]);
+  const [m, fav, rr] = await Promise.all([api("/me").catch(() => null), api("/fav").catch(() => null), api("/reread").catch(() => null)]);
   state.synced = !!(m && fav);
+  if (rr) { setRereads(rr); renderReads(); }   // старый Worker без /reread — 404, перечитываний просто нет
   if (m) { setMarks(m); if (state.me) renderMe(); else renderNowReading(); }
   if (fav) {
     const on = new Set(fav.on), off = new Set(fav.off);
@@ -515,7 +519,7 @@ function explain(profile, b) {
 const ALL_PAGE = 60;
 const byStr = f => (a, b) => (f(a) || "").localeCompare(f(b) || "", "ru");
 const ALL_SORT = {
-  read: (a, b) => (b.read || "").localeCompare(a.read || ""),
+  read: (a, b) => lastRead(b).localeCompare(lastRead(a)),   // перечитанное — по последнему разу
   "read-asc": (a, b) => (a.read || "9999").localeCompare(b.read || "9999"),
   author: byStr(b => { const w = (b.authors[0] || "").trim().split(/\s+/); return w[w.length - 1] + " " + w.join(" ") + " " + b.title; }),
   title: byStr(b => b.title.replace(/^[«"'(]+/, "")),
@@ -545,8 +549,13 @@ function matchedContains(b, q) {
 // (recommend_me.py) забирает их оттуда. Старые отметки из этого браузера переносятся туда один раз.
 const MARK_BTN = { "план": ["★ в план", "★ в плане"], "читаю": ["📖 читаю", "📖 читаю"], "читал": ["✓ читал", "✓ читал"], "не то": ["✕ не то", "✕ не то"] };
 const KEEP = ["план", "читаю"];   // эти отметки не прячут книгу, а поднимают её наверх
+// Причины «не то»: по ним пересчёт (recommend_me.py) учится — «жанр» отодвигает похожие книги, «автор» убирает
+// его книги, «позже» ничему не учит, а через LATER_DAYS дней книга возвращается в рекомендации.
+const WHY_NOT = { "жанр": "не мой жанр", "автор": "не мой автор", "позже": "не сейчас" };
+const LATER_DAYS = 90;
 const localHidden = () => JSON.parse(localStorage.getItem("me-hidden") || "{}");
 const today = () => new Date().toISOString().slice(0, 10);
+const markTime = m => m.at || Date.parse(m.date || "") || 0;   // старые отметки — без at, только с датой
 function setMarks(server) {
   state.marks = { ...server };
   for (const x of pending()) {
@@ -556,6 +565,9 @@ function setMarks(server) {
       else delete state.marks[x.body.fantlab];
     }
   }
+  // «Не сейчас» старше LATER_DAYS — книга снова в рекомендациях, будто отметки нет.
+  for (const [id, m] of Object.entries(state.marks))
+    if (m.v === "не то" && m.why === "позже" && Date.now() - markTime(m) > LATER_DAYS * 864e5) delete state.marks[id];
 }
 // Отметки, поставленные до того, как они стали жить на сервере, — в очередь, оттуда на сервер.
 function migrateHidden() {
@@ -565,23 +577,39 @@ function migrateHidden() {
   savePending([...pending(), ...local.map(([id, m]) => ({ path: "/me", body: { fantlab: +id, v: m.why, title: m.title }, key: "me:" + id }))]);
   localStorage.removeItem("me-hidden");
 }
-function markRec(r, v) {
+// extra — why (причина «не то») или fin (дочитал сейчас); keep — не снимать отметку повторным нажатием
+// (так «следующей» в плане ставит тот же «план» заново, со свежим временем).
+function markRec(r, v, extra = {}, keep) {
   if (!haveKey()) return;
-  const was = state.marks[r.fantlab], next = was && was.v === v ? null : v;   // повторное нажатие снимает отметку
-  const body = { fantlab: r.fantlab, v: next, title: r.title, authors: r.authors, image: r.image || null, from: (r.friends || [])[0]?.from };
+  const was = state.marks[r.fantlab], next = was && was.v === v && !keep ? null : v;   // повторное нажатие снимает отметку
+  const body = { fantlab: r.fantlab, v: next, title: r.title, authors: r.authors, image: r.image || null, from: (r.friends || [])[0]?.from,
+    ...(next ? extra : {}), at: Date.now() };
   if (next) state.marks[r.fantlab] = { ...body, date: today() }; else delete state.marks[r.fantlab];
   renderMe();
   if (state.picks) renderPicks();
   if (document.getElementById("tab-dice").classList.contains("active")) renderDice();
+  if (document.getElementById("tab-stats").classList.contains("active")) renderStats();
   enqueue("/me", body, "me:" + r.fantlab);
 }
 // Дочитал: полка и оценки живут на BookMix — открыть там поиск книги, чтобы сразу поставить оценку, а здесь
-// отметить «читал». В понедельник автообновление привезёт книгу на полку уже с оценкой.
+// отметить «читал» с fin: до понедельничного обновления книга видна как «дочитано, ждёт полки» и уже в счётчике года.
 function finishRec(r) {
   const q = [r.title, (r.authors || [])[0] && r.authors[0].split(/\s+/).pop()].filter(Boolean).join(" ");
   window.open("https://bookmix.ru/booksearch/?keyword=" + encodeURIComponent(q), "_blank", "noopener");
-  markRec(r, "читал");
+  markRec(r, "читал", { fin: 1 });
   toast("Поставьте оценку на BookMix — в понедельник книга приедет на полку");
+}
+// Дочитанное кнопкой «дочитал», которого ещё нет на полке: BookMix и разметка — раз в неделю.
+function waitingShelf() {
+  return Object.entries(state.marks || {}).filter(([, m]) => m.v === "читал" && m.fin)
+    .map(([id, m]) => ({ fantlab: +id, ...m }))
+    .filter(m => { const h = shelfMatch(m.title, (m.authors || [])[0], m.fantlab); return !(h && h.b); })
+    .sort((a, b) => markTime(b) - markTime(a));
+}
+// «Следующей»: книга плана встаёт первой — тот же «план» заново, с новым временем отметки.
+function bumpPlan(r) {
+  markRec(r, "план", {}, true);
+  toast(`Следующей — «${r.title}»`);
 }
 // Где взять: поиск по названию и фамилии автора — прямых ссылок на книгу в магазинах у нас нет.
 const WHERE = [["Яндекс Книги", q => `https://books.yandex.ru/search?text=${q}`], ["ЛитРес", q => `https://www.litres.ru/search/?q=${q}`],
@@ -603,10 +631,18 @@ function recEl(r, full) {
   const about = !r.description ? null : full === true || !why ? el("div", { class: "s" }, r.description)
     : el("details", { class: "about" }, el("summary", {}, "о книге"), el("div", { class: "s" }, r.description));
   // У книги, которую читаешь, по делу три кнопки: дочитал, отложить обратно в план, бросил.
-  const btns = !state.owner ? null : mark && mark.v === "читаю" ? [
+  const btnBox = el("div", { class: "recbtns" });
+  // «Не то» сначала спрашивает почему: по причине пересчёт учится, что предлагать реже.
+  const askWhy = () => btnBox.replaceChildren(el("span", { class: "meta" }, "Почему?"),
+    ...Object.entries(WHY_NOT).map(([k, label]) => chip(label, "", () => markRec(r, "не то", { why: k }))),
+    chip("просто скрыть", "", () => markRec(r, "не то")), chip("← назад", "", () => btnBox.replaceChildren(...btns)));
+  const btns = !state.owner ? [] : mark && mark.v === "читаю" ? [
     chip("✓ дочитал → BookMix", "on", () => finishRec(r)), chip("★ отложить", "", () => markRec(r, "план")),
     chip("✕ бросил", "", () => markRec(r, "не то"))]
-    : Object.entries(MARK_BTN).map(([v, [off, on]]) => chip(mark && mark.v === v ? on : off, mark && mark.v === v ? "on" : "", () => markRec(r, v)));
+    : [...Object.entries(MARK_BTN).map(([v, [off, on]]) => chip(mark && mark.v === v ? on : off, mark && mark.v === v ? "on" : "",
+        () => v === "не то" && !(mark && mark.v === v) ? askWhy() : markRec(r, v))),
+      mark && mark.v === "план" && r._next === false ? chip("⤒ следующей", "", () => bumpPlan(r)) : null].filter(Boolean);
+  btnBox.replaceChildren(...btns);
   return el("div", { class: "book rec" },
     r.image ? el("img", { src: r.image, alt: "", loading: "lazy", referrerpolicy: "no-referrer" })
             : coverEl({ title: r.title, authors: r.authors }, "thumb"),
@@ -621,7 +657,7 @@ function recEl(r, full) {
       ...(r.friends || []).filter(f => f.note).map(f => el("div", { class: "friend" }, "💬 ", el("b", {}, f.from), ": ", f.note)),
       el("div", { class: "why" }, why), about),
     // Низ — во всю ширину карточки, под обложкой: так «где взять» и кнопки встают в одну строку каждая.
-    el("div", { class: "rec-foot" }, whereEl(r.title, r.authors), btns ? el("div", { class: "recbtns" }, ...btns) : null));
+    el("div", { class: "rec-foot" }, whereEl(r.title, r.authors), btns.length ? btnBox : null));
 }
 // Фильтр рекомендаций: все или один источник, с числом книг на кнопке. Не запоминается — каждый заход со всех:
 // раньше кнопки выключали источники и выбор хранился на устройстве, и «только друзья» (там пусто — совет уже
@@ -644,7 +680,7 @@ function markedRecs(v) {
   const me = state.me || { fresh: [], continue: [] };
   const all = new Map([...me.fresh, ...me.continue, ...(me.plan || [])].map(r => [r.fantlab, r]));
   return Object.entries(state.marks).filter(([, m]) => m.v === v)
-    .sort((a, b) => (b[1].date || "").localeCompare(a[1].date || ""))
+    .sort((a, b) => markTime(b[1]) - markTime(a[1]))   // свежее и поднятое «следующей» — первым
     .map(([id, m]) => all.get(+id) || { fantlab: +id, title: m.title, authors: m.authors || [], image: m.image,
       why_auto: m.from ? `Советует ${m.from}.` : null })
     .filter(r => { const h = shelfMatch(r.title, r.authors[0], r.fantlab); return !(h && h.b); });
@@ -671,12 +707,14 @@ function fillCovers() {
 // «Сейчас читаю» — полоской над подбором, её видят и гости.
 function renderNowReading() {
   fillCovers();
-  const box = document.getElementById("now-reading"), rs = markedRecs("читаю");
-  box.hidden = !rs.length;
+  const box = document.getElementById("now-reading"), rs = markedRecs("читаю"), again = state.lib.filter(rereadingNow);
+  box.hidden = !rs.length && !again.length;
   box.replaceChildren(el("span", { class: "nr-h" }, state.owner ? "📖 Сейчас читаю:" : "📖 Хозяин сейчас читает:"),
     ...rs.map(r => el("a", { class: "nr-book", href: `https://fantlab.ru/work${r.fantlab}`, target: "_blank", rel: "noopener" },
       r.image ? el("img", { src: r.image, alt: "", referrerpolicy: "no-referrer" }) : coverEl({ title: r.title, authors: r.authors }, "nr-cover"),
-      el("span", {}, el("b", {}, r.title), (r.authors || []).length ? el("span", { class: "meta" }, " — " + r.authors.join(", ")) : null))));
+      el("span", {}, el("b", {}, r.title), (r.authors || []).length ? el("span", { class: "meta" }, " — " + r.authors.join(", ")) : null))),
+    ...again.map(b => el("a", { class: "nr-book", href: "#", onclick: e => { e.preventDefault(); openCard(b); } }, coverEl(b, "nr-cover"),
+      el("span", {}, el("b", {}, b.title), el("span", { class: "meta" }, " — " + b.authors.join(", ") + " · 🔁 перечитываю")))));
 }
 // «В планах» — обложки в один ряд, листаются вбок: сколько бы книг ни было, места полка занимает столько же.
 // Нажатие на обложку раскрывает под рядом полную карточку с кнопками, повторное — сворачивает.
@@ -688,6 +726,7 @@ function renderPlan(plan) {
     onclick: () => { state.planOpen = state.planOpen === r.fantlab ? null : r.fantlab; renderPlan(plan); } },
   r.image ? el("img", { class: "tile-img", src: r.image, alt: "", loading: "lazy", referrerpolicy: "no-referrer" })
     : coverEl({ title: r.title, authors: r.authors }, "tile-img"),
+  r === plan[0] && plan.length > 1 ? el("div", { class: "tile-y" }, "следующая") : null,
   el("div", { class: "tile-t" }, r.title), el("div", { class: "tile-a" }, r.authors[0] || ""))));
   // Стрелки — для мыши (на телефоне ряд листают пальцем) и только туда, куда ещё есть что листать.
   const arrow = d => el("button", { class: "shelf-arrow " + (d < 0 ? "prev" : "next"), "aria-label": d < 0 ? "назад" : "дальше", hidden: "",
@@ -698,7 +737,7 @@ function renderPlan(plan) {
   new ResizeObserver(arrows).observe(row);   // ряд рисуется и на скрытой вкладке — размеры появятся, когда её откроют
   const open = plan.find(r => r.fantlab === state.planOpen);
   box.replaceChildren(el("div", { class: "shelf" }, row, prev, next));
-  if (open) box.append(recEl(open));
+  if (open) box.append(recEl({ ...open, _next: open === plan[0] }));   // не первой — кнопка «⤒ следующей»
   row.scrollLeft = x;   // перерисовка (отметка, подтянутая обложка) не сбрасывает ряд в начало
 }
 // Отметить книгу, которой нет в рекомендациях: поиск по FantLab.
@@ -738,9 +777,14 @@ function renderMe() {
       state.meSrc = src === k ? null : k; renderMe();   // повторное нажатие — снова все
     })));
   scrollToChip(srcBox, srcBox.querySelector(".chip.on"));
-  const reading = markedRecs("читаю"), plan = markedRecs("план");
-  document.getElementById("me-reading-h").hidden = !reading.length;
-  document.getElementById("me-reading").replaceChildren(...reading.map(recEl));
+  const reading = markedRecs("читаю"), plan = markedRecs("план"), again = state.lib.filter(rereadingNow), done = waitingShelf();
+  document.getElementById("me-reading-h").hidden = !reading.length && !again.length;
+  document.getElementById("me-reading").replaceChildren(...reading.map(r => recEl(r)), ...again.map(rereadEl));
+  // Дочитанное кнопкой «дочитал» видно сразу — полка с BookMix догонит после понедельничного обновления.
+  const doneBox = document.getElementById("me-done");
+  doneBox.hidden = !done.length;
+  doneBox.replaceChildren(...(done.length ? ["✓ Дочитано, ждёт полки: ", ...done.flatMap((m, i) => [i ? ", " : "", el("b", {}, `«${m.title}»`),
+    m.date ? ` (${dmy(m.date).slice(0, 5)})` : ""]), " — на полке появится после обновления в понедельник."] : []));
   const planH = document.getElementById("me-plan-h");
   planH.hidden = !plan.length;
   planH.dataset.n = plan.length;
@@ -767,9 +811,11 @@ function renderMe() {
   const box = document.getElementById("me-hidden");
   box.hidden = !state.owner || !gone.length;
   box.querySelector("summary").textContent = `Скрыто: ${gone.length}`;
-  box.querySelector("div").replaceChildren(...gone.sort((a, b) => (b[1].date || "").localeCompare(a[1].date || "")).map(([id, m]) =>
+  const whyNote = m => m.why === "позже" ? `не сейчас, вернётся ${dmy(new Date(markTime(m) + LATER_DAYS * 864e5).toISOString().slice(0, 10))}`
+    : m.why ? `не то: ${WHY_NOT[m.why]}` : m.fin ? "дочитал" : m.v;
+  box.querySelector("div").replaceChildren(...gone.sort((a, b) => markTime(b[1]) - markTime(a[1])).map(([id, m]) =>
     el("div", { class: "aw-row" }, `«${m.title}»`, (m.authors || []).length ? " — " + m.authors.join(", ") : "",
-      el("span", { class: "meta" }, ` · ${m.v} `), el("a", { href: "#", onclick: e => { e.preventDefault(); markRec({ fantlab: +id, ...m }, m.v); } }, "вернуть"))));
+      el("span", { class: "meta" }, ` · ${whyNote(m)} `), el("a", { href: "#", onclick: e => { e.preventDefault(); markRec({ fantlab: +id, ...m }, m.v); } }, "вернуть"))));
 }
 
 // ---------- премии ----------
@@ -1453,13 +1499,15 @@ function niceTicks(max) {
   return out;
 }
 // Столбики: подпись значения — только у отмеченных (максимум, текущий год), остальное — в подсказке и таблице.
+// v2 — вторая часть столбика поверх первой (перечитанное); подпись над столбиком — первая часть: «новых книг».
 function columns(items, opts = {}) {
-  const ticks = niceTicks(Math.max(...items.map(x => x.v), 1)), top = ticks[ticks.length - 1];
+  const ticks = niceTicks(Math.max(...items.map(x => x.v + (x.v2 || 0)), 1)), top = ticks[ticks.length - 1];
   return el("div", { class: "cc" + (opts.cls ? " " + opts.cls : "") },
     el("div", { class: "cc-grid" }, ...ticks.map(t => el("div", { class: "cc-tick", style: `bottom:${100 * t / top}%` }, el("span", {}, t)))),
     el("div", { class: "cc-cols" }, ...items.map(x => withTip(el("div", {
       class: "cc-col" + (x.sel ? " sel" : "") + (opts.onclick ? " click" : ""), onclick: opts.onclick ? () => opts.onclick(x) : null },
-      x.label_v ? el("span", { class: "cc-val", style: `bottom:${100 * x.v / top}%` }, x.v) : null,
+      x.label_v ? el("span", { class: "cc-val", style: `bottom:${100 * (x.v + (x.v2 || 0)) / top}%` }, x.v) : null,
+      x.v2 ? el("div", { class: "cc-bar rr", style: `height:${100 * x.v2 / top}%` }) : null,
       el("div", { class: "cc-bar " + (x.cls || ""), style: `height:${100 * x.v / top}%` }),
       el("span", { class: "cc-x" }, x.axis || "")), x.tip))));
 }
@@ -1549,16 +1597,22 @@ function renderReview(y, nav) {
   const mMax = Math.max(...byMonth.map(x => x.length));
   const card = (title, sub, ...kids) => el("section", { class: "st-card" }, el("h3", {}, title), sub ? el("div", { class: "meta" }, sub) : null, ...kids);
   const link = b => el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(b); } }, "«" + b.title + "»");
-  const delta = bs.length - prev;
+  // Перечитанное в этом году и дочитанное, что ещё не приехало с BookMix.
+  const again = lib.flatMap(b => rereadsOf(b).filter(m => +m.slice(0, 4) === y).map(m => ({ b, m }))).sort((a, b) => a.m.localeCompare(b.m));
+  const waiting = waitingShelf().filter(m => +(m.date || today()).slice(0, 4) === y);
+  const n = bs.length + waiting.length, delta = n - prev;
+  const moodText = [moods.length ? `Год вышел ${joinAnd(moods)}, чем обычно.` : "", more.length ? `Больше обычного: ${more.join(", ")}.` : ""].filter(Boolean).join(" ");
   box.replaceChildren(...[
     nav,
     el("section", { class: "st-card review-hero" },
-      el("div", { class: "hero-v" }, books(bs.length)),
+      el("div", { class: "hero-v" }, books(n)),
       el("div", { class: "hero-s" }, `прочитано в ${y} году` + (y === curY ? " — год ещё идёт" : "") +
         (prev ? ` · ${delta > 0 ? "на " + delta + " больше" : delta < 0 ? "на " + -delta + " меньше" : "столько же"}, чем в ${y - 1}-м` : "")),
-      moods.length || more.length ? el("p", { class: "review-mood" },
-        [moods.length ? `Год вышел ${joinAnd(moods)}, чем обычно.` : "", more.length ? `Больше обычного: ${more.join(", ")}.` : ""].filter(Boolean).join(" ")) : null,
-      el("button", { class: "link", onclick: () => shareLink(location.origin + location.pathname + "#stats?r=" + y) }, "🔗 Поделиться итогами")),
+      again.length || waiting.length ? el("div", { class: "hero-s" }, [again.length ? `🔁 и ${again.length} перечитано` : "",
+        waiting.length ? `✓ ${waiting.length} ждут полки` : ""].filter(Boolean).join(" · ")) : null,
+      moodText ? el("p", { class: "review-mood" }, moodText) : null,
+      el("button", { class: "link", onclick: () => shareLink(location.origin + location.pathname + "#stats?r=" + y) }, "🔗 Поделиться итогами"),
+      el("button", { class: "link", onclick: () => shareReviewImage({ y, n, rr: again.length, mood: moodText, best, topAuthor }) }, " · 🖼 картинкой")),
     el("div", { class: "st-tiles" },
       statTile("Средняя оценка", avg.toFixed(2).replace(".", ","), `пятёрок — ${pct(rated.filter(b => b.rating === 5).length, rated.length)}%`),
       statTile("Любимых", "❤ " + favs.length, favs.length ? `${pct(favs.length, bs.length)}% года` : "пока ни одной"),
@@ -1576,9 +1630,70 @@ function renderReview(y, nav) {
       card("По месяцам", "Наведите на столбик — покажу, что читалось.", columns(byMonth.map((xs, i) => ({ v: xs.length, axis: MONTHS[i].slice(0, 3), label_v: xs.length === mMax && mMax > 0,
         tip: [books(xs.length), MONTHS[i] + (xs.length ? ": " + xs.slice(0, 4).map(b => "«" + b.title + "»").join(", ") + (xs.length > 4 ? "…" : "") : "")] })), { cls: "cc-short" })),
       regions.size ? card("Где побывали", "", hbars([...regions.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([r, n]) => ({ label: r, v: n, tip: [books(n), r] })))) : null),
+    again.length ? card(`Перечитано в ${y} году`, "", el("ul", { class: "review-list" }, ...again.map(({ b, m }) =>
+      el("li", {}, link(b), el("span", { class: "meta" }, ` — ${MONTHS[+m.slice(5, 7) - 1]}, впервые — ${monthName(b.read)}`))))) : null,
     card(`Все книги ${y} года`, "", el("div", { id: "review-list", class: "list" })),
   ].filter(Boolean));
   renderList("review-list", [...bs].reverse());
+}
+
+// Итоги года картинкой (1080×1350, как пост) — отправить друзьям. Обложки — файлы самого сайта: чужие картинки
+// «испачкали» бы canvas, и браузер не отдал бы PNG. Цвета — текущей темы.
+async function reviewImage(d) {
+  const W = 1080, H = 1350, c = Object.assign(document.createElement("canvas"), { width: W, height: H }), g = c.getContext("2d");
+  const css = getComputedStyle(document.documentElement), col = k => css.getPropertyValue(k).trim();
+  const SANS = "system-ui, -apple-system, 'Segoe UI', sans-serif";
+  const text = (s, x, y, font, color) => { g.font = font; g.fillStyle = color; g.fillText(s, x, y); return g.measureText(s).width; };
+  const wrap = (s, maxW, max) => {
+    const lines = [""];
+    for (const w of s.split(" ")) { const t = (lines[lines.length - 1] + " " + w).trim(); if (g.measureText(t).width > maxW && lines[lines.length - 1]) lines.push(w); else lines[lines.length - 1] = t; }
+    return lines.length > max ? [...lines.slice(0, max - 1), lines.slice(max - 1).join(" ").slice(0, 60) + "…"] : lines;
+  };
+  g.fillStyle = col("--bg"); g.fillRect(0, 0, W, H);
+  g.fillStyle = col("--accent"); g.fillRect(0, 0, W, 14);
+  text("📚 Книжная полка Alex Lion", 80, 110, `400 34px ${SANS}`, col("--muted"));
+  text(`Итоги ${d.y}`, 80, 200, `700 72px ${SANS}`, col("--fg"));
+  const nw = text(String(d.n), 74, 400, `700 190px ${SANS}`, col("--accent"));
+  text(books(d.n).replace(/^\d+ /, ""), 74 + nw + 28, 380, `600 56px ${SANS}`, col("--fg"));
+  text(`прочитано в ${d.y} году` + (d.rr ? ` · и ${d.rr} перечитано` : ""), 80, 465, `400 36px ${SANS}`, col("--muted"));
+  let y = 545;
+  if (d.mood) {
+    g.font = `italic 38px Georgia, 'Times New Roman', serif`;
+    for (const line of wrap(d.mood, W - 160, 3)) { text(line, 80, y, g.font, col("--fg")); y += 50; }
+  }
+  const best = d.best.slice(0, 5);
+  if (best.length) {
+    y = Math.max(y + 30, 700);
+    text("Лучшее за год", 80, y, `600 34px ${SANS}`, col("--fg"));
+    const cw = 168, ch = 252, gap = 15, top = y + 28;
+    const pics = await Promise.all(best.map(b => b.cover ? new Promise(ok => { const im = new Image(); im.onload = () => ok(im); im.onerror = () => ok(null); im.src = b.cover; }) : null));
+    best.forEach((b, i) => {
+      const x = 80 + i * (cw + gap);
+      if (pics[i]) { g.drawImage(pics[i], x, top, cw, ch); return; }
+      let h = 0;
+      for (const ch2 of b.authors.join()) h = (h * 31 + ch2.charCodeAt(0)) % 360;
+      g.fillStyle = `hsl(${h} 38% 42%)`; g.fillRect(x, top, cw, ch);
+      g.font = `600 22px ${SANS}`;
+      wrap(b.title, cw - 24, 5).forEach((line, j) => text(line, x + 12, top + 36 + j * 28, g.font, "#fff"));
+    });
+    y = top + ch + 40;
+  }
+  if (d.topAuthor) {
+    text("Автор года", 80, y + 40, `400 30px ${SANS}`, col("--muted"));
+    text(`${d.topAuthor[0]} — ${books(d.topAuthor[1])}`, 80, y + 95, `600 46px ${SANS}`, col("--fg"));
+  }
+  text("books.sirenyov.link", 80, H - 60, `400 30px ${SANS}`, col("--muted"));
+  return new Promise(ok => c.toBlob(ok, "image/png"));
+}
+async function shareReviewImage(d) {
+  const blob = await reviewImage(d), file = new File([blob], `itogi-${d.y}.png`, { type: "image/png" });
+  // Телефон — в «Поделиться» (мессенджер, фото); компьютер — файлом.
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: `Итоги ${d.y}` }); return; } catch (e) { if (e.name === "AbortError") return; }
+  }
+  const a = el("a", { href: URL.createObjectURL(blob), download: file.name });
+  document.body.append(a); a.click(); a.remove();
+  toast("Картинка сохранена: " + file.name);
 }
 
 function renderShelfStats(nav) {
@@ -1593,19 +1708,26 @@ function renderShelfStats(nav) {
   const rated = lib.filter(b => b.rating);
   const avg = rated.reduce((s, b) => s + b.rating, 0) / (rated.length || 1);
   const favN = lib.filter(b => b.fav).length;
-  const thisYear = (byYear.get(curY) || []).length;
+  // Перечитанное — отдельно от новых книг; дочитанное кнопкой, но ещё не приехавшее с BookMix, — к новым книгам года.
+  const rrByYear = new Map(), waitByYear = new Map(), push = (m, y, x) => { if (!m.has(y)) m.set(y, []); m.get(y).push(x); };
+  for (const b of lib) for (const m of rereadsOf(b)) push(rrByYear, +m.slice(0, 4), { b, m });
+  for (const m of waitingShelf()) push(waitByYear, +(m.date || today()).slice(0, 4), m);
+  const rrN = y => (rrByYear.get(y) || []).length, waitN = y => (waitByYear.get(y) || []).length;
+  const again = lib.filter(b => timesRead(b) > 1).sort((a, b) => timesRead(b) - timesRead(a) || a.title.localeCompare(b.title)).slice(0, 12);
+  const thisYear = (byYear.get(curY) || []).length + waitN(curY);
   const lastSame = (byYear.get(curY - 1) || []).filter(b => +b.read.slice(5, 7) <= curM).length;
   const diary = dated.filter(b => readYear(b) >= 2013);
   const perYear = diary.length / (curY - 2013 + curM / 12);
 
   // Книги по годам: эпохи различаются заливкой, легенда — карточки эпох под графиком.
-  const max = Math.max(...years.map(y => (byYear.get(y) || []).length));
+  const max = Math.max(...years.map(y => (byYear.get(y) || []).length + waitN(y)));
   const yearCols = columns(years.map(y => {
-    const bs = byYear.get(y) || [], ep = epochOf(y), fav = bs.filter(b => b.fav).length;
+    const bs = byYear.get(y) || [], ep = epochOf(y), fav = bs.filter(b => b.fav).length, n = bs.length + waitN(y);
     const r = bs.filter(b => b.rating), a = r.reduce((s, b) => s + b.rating, 0) / (r.length || 1);
-    return { y, v: bs.length, cls: ep.key, sel: state.stYear === y, label_v: bs.length === max || y === curY,
+    return { y, v: n, v2: rrN(y), cls: ep.key, sel: state.stYear === y, label_v: n === max || y === curY,
       axis: y === y0 ? y : (y % 5 === 0 && y - y0 >= 3) || y === y1 ? shortYear(y) : "",
-      tip: [books(bs.length), `${y} · ${ep.name.toLowerCase()}`, bs.length ? `средняя оценка ${dec1(a)}${fav ? ` · ❤ ${fav}` : ""}` : ""].filter(Boolean) };
+      tip: [books(n), `${y} · ${ep.name.toLowerCase()}`, bs.length ? `средняя оценка ${dec1(a)}${fav ? ` · ❤ ${fav}` : ""}` : "",
+        rrN(y) ? `🔁 и перечитано: ${rrN(y)}` : "", waitN(y) ? `✓ из них ждут полки: ${waitN(y)}` : ""].filter(Boolean) };
   }), { onclick: x => { state.stYear = state.stYear === x.y ? null : x.y; renderStats(); saveHash(); } });
 
   // Месяцы — только по дневнику: раньше месяц прочтения не записывался.
@@ -1656,19 +1778,25 @@ function renderShelfStats(nav) {
     nav,
     el("div", { class: "st-tiles" },
       statTile("Прочитано", books(lib.length), plural(authors.size, "автор", "автора", "авторов")),
-      statTile(`В ${curY} году`, books(thisYear), `за то же время в ${curY - 1}-м — ${lastSame}`),
+      statTile(`В ${curY} году`, books(thisYear), [rrN(curY) ? `+ ${rrN(curY)} перечитано` : "", waitN(curY) ? `ждут полки — ${waitN(curY)}` : "",
+        `за то же время в ${curY - 1}-м — ${lastSame}`].filter(Boolean).join(" · ")),
       statTile("В среднем за год", "≈ " + Math.round(perYear), "по дневнику, с 2013-го"),
       statTile("Средняя оценка", avg.toFixed(2).replace(".", ","), `пятёрок — ${pct(rated.filter(b => b.rating === 5).length, rated.length)}%`),
       statTile("Любимых", "❤ " + favN, `${pct(favN, lib.length)}% полки`)),
     card("Книги по годам", "Нажмите на год — покажу, что тогда читалось.", yearCols,
       el("div", { class: "epochs" }, ...EPOCHS.map(e => el("div", { class: "epoch" },
         el("div", { class: "epoch-h" }, el("span", { class: "swatch " + e.key }), el("b", {}, e.name), el("span", { class: "meta" }, " · " + e.span)),
-        el("p", {}, e.note)))),
+        el("p", {}, e.note))),
+        rrByYear.size ? el("div", { class: "epoch" }, el("div", { class: "epoch-h" }, el("span", { class: "swatch rr" }), el("b", {}, "Перечитано")),
+          el("p", {}, "Сверху столбика: BookMix помнит только первое прочтение, повторные отмечаются в карточке книги.")) : null),
       el("details", { class: "st-table" }, el("summary", {}, "Таблицей"),
-        el("table", {}, el("tbody", {}, ...years.filter(y => byYear.has(y)).map(y => el("tr", {}, el("th", {}, y), el("td", {}, byYear.get(y).length))))))),
+        el("table", {}, el("tbody", {}, ...years.filter(y => byYear.has(y) || rrN(y) || waitN(y)).map(y => el("tr", {}, el("th", {}, y),
+          el("td", {}, (byYear.get(y) || []).length + waitN(y), rrN(y) ? ` + ${rrN(y)} перечит.` : ""))))))),
     sel ? el("section", { class: "st-card", id: "st-year" }, el("h3", {}, `${sel} — ${books(byYear.get(sel).length)} `,
         sel >= 2013 ? el("button", { class: "link", onclick: () => { state.stReview = sel; state.stYear = null; renderStats(); saveHash(); window.scrollTo(0, 0); } }, "итоги года →") : null,
         el("button", { class: "link", onclick: () => { state.stYear = null; renderStats(); saveHash(); } }, "✕ свернуть")),
+      rrN(sel) ? el("p", { class: "meta" }, "🔁 Перечитано: ", ...rrByYear.get(sel).flatMap(({ b }, i) => [i ? ", " : "",
+        el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(b); } }, "«" + b.title + "»")])) : null,
       el("div", { id: "st-year-list", class: "list" })) : null,
     el("div", { class: "st-grid" },
       card("Когда читается", "По месяцам, все годы дневника вместе.", monthCols),
@@ -1680,7 +1808,10 @@ function renderShelfStats(nav) {
       card("Где происходит", "Нажмите — подберу книги оттуда.", hbars(regions.map(([v, n]) => ({ key: v, label: v, v: n, tip: [books(n), v] })),
         x => goPick(f => f.places.add(x.key)))),
       card("Что за книги", "", hbars(forms.map(([v, n]) => ({ label: v, v: n, tip: [books(n), v] }))),
-        el("h3", {}, "Оценки"), hbars(ratings.map(([r, n]) => ({ label: el("span", { class: "stars" }, stars(r)), v: n, tip: [books(n), `оценка ${r}`] })))))].filter(Boolean));
+        el("h3", {}, "Оценки"), hbars(ratings.map(([r, n]) => ({ label: el("span", { class: "stars" }, stars(r)), v: n, tip: [books(n), `оценка ${r}`] }))))),
+    // Сколько раз прочитана книга — и перечитывания без даты (детство): здесь важно «сколько», а не «когда».
+    again.length ? card("Самые перечитываемые", "Сколько раз прочитана книга, считая перечитывания без даты. Нажмите — откроется карточка.",
+      hbars(again.map(b => ({ b, label: b.title, v: timesRead(b), tip: [plural(timesRead(b), "раз", "раза", "раз"), b.title] })), x => openCard(x.b))) : null].filter(Boolean));
   if (sel) renderList("st-year-list", [...byYear.get(sel)].sort((a, b) => b.read.localeCompare(a.read)));
 }
 
@@ -1827,6 +1958,9 @@ function libEl(b, extra) {
       el("div", { class: "t" }, b.title),
       el("div", { class: "a" }, b.authors.join(", "), " ", el("span", { class: "stars" }, stars(b.rating)), b.fav ? " ❤" : ""),
       b.series ? el("div", { class: "ser" }, "📚 ", seriesLabel(b)) : null,
+      rereadingNow(b) ? el("div", { class: "ser" }, "📖 перечитывается сейчас")
+        : timesRead(b) > 1 ? el("div", { class: "ser" }, `🔁 читана ${plural(timesRead(b), "раз", "раза", "раз")}` +
+          (rereadsOf(b).length ? ", перечитана: " + rereadsOf(b).map(m => m.slice(0, 4)).join(", ") : "")) : null,
       el("div", { class: "s" }, b.summary),
       el("div", { class: "why" }, extra ? extra(b) : b.why)));
 }
@@ -1890,6 +2024,76 @@ function renderFavAuthors() {
       el("a", { href: "#", onclick: e => { e.preventDefault(); showSeries(x.name); } }, x.name),
       el("span", { class: "meta" }, " — " + fmt(x))))))));
 }
+// ---------- перечитывания ----------
+// BookMix помнит только первое прочтение; повторные живут в Worker (/reread): {id книги: {d: ["ГГГГ-ММ"…], now: 1}}.
+// В счётчиках они идут отдельной строкой: «39 книг + 2 перечитано» — иначе «книг за год» перестали бы быть новыми книгами.
+state.rereads = {};
+const rereadsOf = b => (state.rereads[b.id] || {}).d || [];
+const rereadingNow = b => !!(state.rereads[b.id] || {}).now;
+// Без даты — «перечитывал ещё раза три, когда — не помню» (детство, давние годы): в карточке и «сколько раз», но не в годах.
+const undatedOf = b => (state.rereads[b.id] || {}).n || 0;
+const timesRead = b => 1 + rereadsOf(b).length + undatedOf(b);
+const lastRead = b => [b.read || "", ...rereadsOf(b)].sort().pop();
+const thisMonth = () => new Date().toISOString().slice(0, 7);
+const monthName = m => m ? `${MONTHS[+m.slice(5, 7) - 1]} ${m.slice(0, 4)}` : "давно";
+function applyReread(all, id, op) {
+  const x = all[id] ? { ...all[id], d: [...all[id].d] } : { d: [] };
+  if (op.add && !x.d.includes(op.add)) x.d = [...x.d, op.add].sort();
+  if (op.del) x.d = x.d.filter(m => m !== op.del);
+  if (op.n > 0) x.n = op.n; else if (op.n === 0) delete x.n;
+  if (op.now === 1) x.now = 1; else if (op.now === 0) delete x.now;
+  if (x.d.length || x.n || x.now) all[id] = x; else delete all[id];
+}
+function setRereads(server) {
+  state.rereads = JSON.parse(JSON.stringify(server || {}));
+  for (const x of pending()) if (x.path === "/reread") applyReread(state.rereads, x.body.id, x.body);
+}
+function reread(b, op, msg) {
+  if (!haveKey()) return;
+  if ((op.add && !/^\d{4}-(0[1-9]|1[0-2])$/.test(op.add)) || (op.add && op.add > thisMonth())) { toast("Выберите месяц не позже текущего"); return; }
+  applyReread(state.rereads, b.id, op);
+  enqueue("/reread", { id: b.id, ...op }, `rr:${b.id}:${op.add || op.del || (op.n !== undefined ? "n" : "now")}`);
+  if (msg) toast(msg);
+  renderReads();
+  if (document.getElementById("card").open && state.cardId === b.id) openCard(b);
+}
+function renderReads() {
+  renderAll("keep");
+  if (state.me) renderMe(); else renderNowReading();
+  if (document.getElementById("tab-stats").classList.contains("active")) renderStats();
+}
+// В карточке книги: когда прочитана и перечитана; владельцу — «перечитываю» и «＋ перечитал» за выбранный месяц.
+function readsEl(b) {
+  const rr = rereadsOf(b), now = rereadingNow(b), n = undatedOf(b), times = timesRead(b);
+  const month = el("input", { type: "month", class: "rr-month", value: thisMonth(), max: thisMonth(), "aria-label": "Месяц, когда перечитали" });
+  return el("div", { class: "reads" },
+    el("div", { class: "meta" }, "📖 Прочитана: " + monthName(b.read),
+      ...(rr.length ? [" · 🔁 перечитана: ", ...rr.flatMap((m, i) => [i ? ", " : "", monthName(m),
+        state.owner ? el("button", { class: "rr-del", title: "убрать", "aria-label": "убрать " + monthName(m), onclick: () => reread(b, { del: m }) }, "✕") : null])] : []),
+      n ? ` · и ещё ${plural(n, "раз", "раза", "раз")} без даты` : "", times > 1 ? el("b", {}, ` · всего ${plural(times, "раз", "раза", "раз")}`) : ""),
+    now ? el("div", { class: "meta" }, state.owner ? "Перечитываете сейчас" : "Хозяин сейчас перечитывает") : null,
+    state.owner ? el("div", { class: "chips rr-btns" },
+      now ? chip("✓ перечитал", "on", () => reread(b, { add: thisMonth(), now: 0 }, `Записал: перечитана в ${MONTHS[new Date().getMonth()]}`))
+        : chip("📖 перечитываю", "", () => reread(b, { now: 1 }, "Книга — в «Сейчас читаю»")),
+      now ? chip("✕ бросил", "", () => reread(b, { now: 0 })) : null,
+      month, chip("＋ перечитал", "", () => reread(b, { add: month.value }, "Записал перечитывание"))) : null,
+    // Давние и детские перечитывания: помнится «сколько раз», а не когда. В годы не идут, только в «всего N раз».
+    state.owner ? el("div", { class: "rr-undated meta" }, "Раньше, без даты: ",
+      chip("−", "", () => n && reread(b, { n: n - 1 })), el("b", { class: "rr-n" }, "×" + n), chip("+", "", () => n < 99 && reread(b, { n: n + 1 }))) : null);
+}
+// Перечитываемая книга в «Сейчас читаю».
+function rereadEl(b) {
+  const rr = rereadsOf(b);
+  return el("div", { class: "book rec" }, coverEl(b, "thumb"),
+    el("div", { class: "rec-main" },
+      el("div", { class: "t" }, el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(b); } }, b.title)),
+      el("div", { class: "a" }, b.authors.join(", "), " ", el("span", { class: "stars" }, stars(b.rating))),
+      el("div", { class: "why" }, `🔁 Перечитываете — впервые ${monthName(b.read)}` + (rr.length ? `, ещё раз — ${rr.map(monthName).join(", ")}` : ""))),
+    state.owner ? el("div", { class: "rec-foot" }, el("div", { class: "recbtns" },
+      chip("✓ перечитал", "on", () => reread(b, { add: thisMonth(), now: 0 }, `Записал: перечитана в ${MONTHS[new Date().getMonth()]}`)),
+      chip("✕ бросил", "", () => reread(b, { now: 0 })))) : null);
+}
+
 function toggleFav(b) {
   if (!haveKey()) return;
   b.fav = !b.fav;
@@ -1916,6 +2120,7 @@ function openCard(b) {
         b.shelf === "top" ? el("div", { class: "meta" }, "🏆 в топе владельца") : null,
         state.owner ? el("button", { class: "chip " + (b.fav ? "on" : ""), onclick: () => toggleFav(b) }, b.fav ? "❤ любимое — убрать" : "♡ в любимое")
           : b.fav ? el("div", { class: "meta" }, "❤ любимое владельца") : null)),
+    readsEl(b),
     el("p", {}, el("b", {}, b.summary)),
     el("p", {}, el("i", {}, b.why)),
     el("div", { class: "chips" }, ...b.genres.map(g => chip(g, "on")), ...b.themes.map(t => chip(t))),

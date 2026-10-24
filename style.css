@@ -139,7 +139,10 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .cc-tick { position: absolute; left: 0; right: 0; border-top: 1px solid var(--line); }
 .cc-tick span { position: absolute; right: calc(100% + 6px); transform: translateY(-50%); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .cc-cols { position: absolute; inset: 0; display: flex; align-items: flex-end; gap: 2px; }
-.cc-col { flex: 1; height: 100%; position: relative; display: flex; align-items: flex-end; justify-content: center; outline: none; }
+.cc-col { flex: 1; height: 100%; position: relative; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; outline: none; }
+/* перечитанное — поверх столбика другим цветом; нижняя часть под ней без скругления */
+.cc-bar.rr, .swatch.rr { background: color-mix(in srgb, #e0a800 70%, var(--card)); }
+.cc-bar.rr + .cc-bar { border-radius: 0; }
 .cc-col.click { cursor: pointer; }
 .cc-bar { width: 100%; max-width: 24px; border-radius: 4px 4px 0 0; background: var(--accent); min-height: 1px; }
 .cc-col:hover .cc-bar, .cc-col:focus-visible .cc-bar { filter: brightness(1.18); }
@@ -234,6 +237,15 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .tile.person { text-align: center; }
 .tile.person .tile-img { width: 72px; height: 72px; aspect-ratio: auto; margin: 0 auto; border-radius: 50%; object-fit: cover; object-position: center 25%; }
 .tile-img.ini { display: flex; align-items: center; justify-content: center; color: #fff; font-size: 24px; font-weight: 600; letter-spacing: 1px; }
+/* карточка книги: когда прочитана и перечитана */
+.reads { margin: 12px 0 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }
+.rr-del { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 12px; padding: 0 2px 0 3px; }
+.rr-btns { margin-top: 6px; align-items: center; }
+.rr-undated { margin-top: 6px; display: flex; align-items: center; gap: 6px; }
+.rr-undated .chip { padding: 0 10px; } .rr-n { min-width: 2em; text-align: center; color: var(--fg); }
+.rr-month { font: inherit; font-size: 14px; padding: 3px 6px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
+/* дочитано кнопкой «дочитал», на полку приедет после обновления */
+.me-done { margin: 10px 2px 0; font-size: 14px; color: var(--muted); }
 /* выдвижная панель «Ещё» */
 dialog.nav-sheet:focus { outline: none; }
 dialog.nav-sheet { margin: auto 0 0; width: 100%; max-width: 100%; border-radius: 16px 16px 0 0; padding: 14px 12px calc(14px + env(safe-area-inset-bottom)); }
