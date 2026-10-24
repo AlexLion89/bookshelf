@@ -664,7 +664,8 @@ function renderPlan(plan) {
   row.addEventListener("scroll", arrows, { passive: true });
   new ResizeObserver(arrows).observe(row);   // ряд рисуется и на скрытой вкладке — размеры появятся, когда её откроют
   const open = plan.find(r => r.fantlab === state.planOpen);
-  box.replaceChildren(el("div", { class: "shelf" }, row, prev, next), open ? recEl(open) : null);
+  box.replaceChildren(el("div", { class: "shelf" }, row, prev, next));
+  if (open) box.append(recEl(open));
   row.scrollLeft = x;   // перерисовка (отметка, подтянутая обложка) не сбрасывает ряд в начало
 }
 // Отметить книгу, которой нет в рекомендациях: поиск по FantLab.
