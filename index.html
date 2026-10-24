@@ -25,6 +25,7 @@
     <button data-tab="all">Все книги</button>
     <button data-tab="fav">Любимое</button>
     <button data-tab="me" id="me-btn" hidden>Мне почитать</button>
+    <button data-tab="picks" id="picks-btn" hidden>Новинки и подборки</button>
     <button data-tab="stats">Статистика</button>
     <button data-tab="awards">Премии</button>
     <button data-tab="suggest">Предложить книгу</button>
@@ -147,6 +148,27 @@
     <h3>Продолжить начатые циклы</h3>
     <div id="me-continue" class="list"></div>
     <details id="me-hidden" class="me-hidden" hidden><summary></summary><div></div></details>
+  </section>
+
+  <section id="tab-picks" class="tab">
+    <p class="hint" id="pk-hint">Новые книги и тематические подборки по вашему вкусу. Новинки — с FantLab: только первое издание
+      на русском, без переизданий. Подборка недели и тема месяца меняются сами.</p>
+    <h3 id="pk-week-h"></h3>
+    <p class="hint" id="pk-week-hint"></p>
+    <div id="pk-week" class="list"></div>
+    <h3 id="pk-month-h"></h3>
+    <p class="hint" id="pk-month-hint"></p>
+    <div id="pk-month" class="list"></div>
+    <h3>Новинки</h3>
+    <div id="pk-new-when" class="chips"></div>
+    <div id="pk-new-count" class="count"></div>
+    <div id="pk-new" class="list"></div>
+    <h3 id="pk-soon-h">Скоро выйдет</h3>
+    <div id="pk-soon" class="list"></div>
+    <h3>Все подборки</h3>
+    <div id="pk-themes" class="chips"></div>
+    <p class="hint" id="pk-theme-hint"></p>
+    <div id="pk-theme" class="list"></div>
   </section>
 </main>
 

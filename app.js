@@ -212,7 +212,10 @@ async function load() {
     state.me = await m.json();
     const btn = document.getElementById("me-btn");
     btn.hidden = false;
+    document.getElementById("picks-btn").hidden = false;
     if (!owner) {
+      document.getElementById("pk-hint").textContent = "Новые книги и тематические подборки по вкусу хозяина полки. Новинки — с FantLab: " +
+        "только первое издание на русском, без переизданий.";
       btn.textContent = "Что почитать хозяину";
       document.getElementById("me-hint").textContent = "Чего хозяин полки ещё не читал, но, судя по его пятёркам, должно понравиться. " +
         "Если хотите подарить книгу — начните отсюда: сверху то, что он сам собирается прочитать.";
@@ -551,6 +554,7 @@ function markRec(r, v) {
   const body = { fantlab: r.fantlab, v: next, title: r.title, authors: r.authors, image: r.image || null, from: (r.friends || [])[0]?.from };
   if (next) state.marks[r.fantlab] = { ...body, date: today() }; else delete state.marks[r.fantlab];
   renderMe();
+  if (state.picks) renderPicks();
   enqueue("/me", body, "me:" + r.fantlab);
 }
 // Дочитал: полка и оценки живут на BookMix — открыть там поиск книги, чтобы сразу поставить оценку, а здесь
@@ -572,6 +576,7 @@ function recEl(r) {
       el("div", { class: "a" }, r.authors.join(", "), r.year ? `, ${r.year}` : "", r.type ? ` · ${r.type}` : "",
         r.fl_rating ? ` · FantLab ${r.fl_rating} (${r.fl_voters})` : ""),
       note ? el("div", { class: "ser" }, "📚 ", note) : null,
+      r.tag ? el("div", { class: "ser" }, r.tag) : null,
       r.description ? el("div", { class: "s" }, r.description) : null,
       (r.awards || []).length || r.quiz_n ? el("div", { class: "ser" },
         ...(r.awards || []).slice(0, 3).map(x => "🏆 " + x + "  "), r.quiz_n ? `❓ в квизах: ${r.quiz_n}` : "") : null,
@@ -758,6 +763,11 @@ function awardHit(it) {
   ix.memo.set(key, res);
   return res;
 }
+// Цикл прочитан не весь: сколько основных томов на полке.
+function partsRead(it) {
+  if (!it.parts) return 0;
+  return it.parts.filter(p => { const h = awardHit({ t: p.t, a: it.a, fl: p.fl }); return h && h.b; }).length;
+}
 function awardStats(aw) {
   const read = aw.items.filter(awardHit).length;
   return { read, total: aw.items.length };
@@ -810,7 +820,8 @@ function renderAwards() {
   const rows = [];
   let year = null, grid = null;
   for (const it of [...aw.items].sort((a, b) => (b.y || 0) - (a.y || 0) || b.w - a.w)) {
-    const h = awardHit(it);
+    const h = awardHit(it), part = h ? 0 : partsRead(it);
+    const partNote = part ? `прочитано томов: ${part} из ${it.parts.length}` : "";
     if (only && h) continue;
     if (it.y !== year) {
       year = it.y; rows.push(el("div", { class: "aw-year" }, year || "без года"));
@@ -818,7 +829,7 @@ function renderAwards() {
     }
     const flLink = it.fl ? `https://fantlab.ru/work${it.fl}` : it.aid ? `https://fantlab.ru/autor${it.aid}` : null;
     if (covers) {
-      grid.append(tile(it.t || it.a, it.t ? it.a : (h && h.n ? `у вас книг: ${h.n}` : ""), it.img, h, flLink));
+      grid.append(tile(it.t || it.a, it.t ? [it.a, partNote].filter(Boolean).join(" · ") : (h && h.n ? `у вас книг: ${h.n}` : ""), it.img, h, flLink));
       continue;
     }
     const name = it.t ? `«${it.t}» — ${it.a}` : it.a;
@@ -827,9 +838,67 @@ function renderAwards() {
     rows.push(el("div", { class: "aw-row" + (h ? " read" : "") },
       el("span", { class: "aw-mark" }, h ? (h.b && h.b.fav ? "❤" : "✓") : "·"), link,
       h && h.n ? el("span", { class: "meta" }, ` — у вас книг: ${h.n}`) : null,
+      part ? el("span", { class: "meta" }, ` — ${partNote}`) : null,
       it.w ? null : el("span", { class: "meta" }, " (номинант)")));
   }
   document.getElementById("aw-items").replaceChildren(...rows);
+  saveHash();
+}
+
+// ---------- новинки и подборки ----------
+// Номер недели по ISO: подборка недели меняется в понедельник, тема месяца — первого числа, без пересборки сайта.
+function isoWeek(d) {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7));
+  return [t.getUTCFullYear(), Math.ceil(((t - Date.UTC(t.getUTCFullYear(), 0, 1)) / 864e5 + 1) / 7)];
+}
+const PK_WHEN = [[7, "за неделю"], [31, "за месяц"], [0, "все за пять месяцев"]];
+// Прочитанное (уже на полке) и «читал» / «не то» в подборки не попадают, «в план» и «читаю» видны с отметкой.
+function pkBooks(ids) {
+  return ids.map(id => state.picks.books[id]).filter(r => {
+    const m = state.marks[r.fantlab];
+    if (m && !KEEP.includes(m.v)) return false;
+    const h = shelfMatch(r.title, r.authors[0], r.fantlab);
+    return !(h && h.b);
+  });
+}
+async function openPicks() {
+  if (!state.picks) {
+    try { state.picks = await (await fetch("data/picks.json")).json(); } catch {
+      document.getElementById("pk-new-count").textContent = "Подборки сейчас недоступны.";
+      return;
+    }
+  }
+  renderPicks();
+}
+function renderPicks() {
+  const pk = state.picks, now = new Date(), [y, w] = isoWeek(now), month = now.getMonth() + 1;
+  const rot = pk.themes.filter(t => !t.months.length);
+  const week = rot[(y * 53 + w) % rot.length];
+  const mon = pk.themes.find(t => t.months.includes(month)) || rot[(y * 12 + month + 1) % rot.length];
+  for (const [key, th] of [["week", week], ["month", mon]]) {
+    document.getElementById(`pk-${key}-h`).textContent = (key === "week" ? "Подборка недели: " : "Тема месяца: ") + th.title;
+    document.getElementById(`pk-${key}-hint`).textContent = th.hint;
+    document.getElementById(`pk-${key}`).replaceChildren(...pkBooks(th.ids).slice(0, 6).map(recEl));
+  }
+  // Новинки: окно считается от сегодняшней даты; давно не пересобранные данные — с пометкой.
+  const within = d => { const since = new Date(now - d * 864e5).toISOString().slice(0, 10); return pkBooks(pk.new).filter(r => !d || (r.release && r.release >= since)); };
+  // По умолчанию — за месяц, но если подходящих меньше пяти, сразу всё: три книги выглядят как поломка.
+  const days = state.pkWhen ?? (within(31).length >= 5 ? 31 : 0), fresh = within(days);
+  document.getElementById("pk-new-when").replaceChildren(...PK_WHEN.map(([d, label]) =>
+    chip(label, d === days ? "on" : "", () => { state.pkWhen = d; renderPicks(); })));
+  const age = Math.round((now - new Date(pk.built)) / 864e5);
+  document.getElementById("pk-new-count").textContent = (fresh.length ? `По вашему вкусу: ${fresh.length}` : "За это время подходящих новинок нет") +
+    (age > 8 ? ` · данные FantLab от ${new Date(pk.built).toLocaleDateString("ru-RU")}` : "");
+  document.getElementById("pk-new").replaceChildren(...fresh.map(recEl));
+  const soon = pkBooks(pk.soon);
+  document.getElementById("pk-soon-h").hidden = !soon.length;
+  document.getElementById("pk-soon").replaceChildren(...soon.map(recEl));
+  const cur = pk.themes.find(t => t.id === state.pkTheme);
+  document.getElementById("pk-themes").replaceChildren(...pk.themes.map(t =>
+    chip(t.title, t === cur ? "on" : "", () => { state.pkTheme = t === cur ? null : t.id; renderPicks(); })));
+  document.getElementById("pk-theme-hint").textContent = cur ? cur.hint : "";
+  document.getElementById("pk-theme").replaceChildren(...(cur ? pkBooks(cur.ids).map(recEl) : []));
   saveHash();
 }
 
@@ -1378,6 +1447,7 @@ function hashFor() {
     if (q) p.set("q", q);
     if (s !== "read") p.set("sort", s);
   } else if (tab === "awards" && state.awId) p.set("id", state.awId);
+  else if (tab === "picks" && state.pkTheme) p.set("theme", state.pkTheme);
   else if (tab === "stats" && state.stReview) p.set("r", state.stReview);
   else if (tab === "stats" && state.stYear) p.set("y", state.stYear);
   else if (tab === "quiz" && !document.getElementById("qz-read").hidden) p.set("mode", "read");
@@ -1419,6 +1489,7 @@ async function applyHash() {
     if (ALL_SORT[p.get("sort")]) document.getElementById("all-sort").value = p.get("sort");
     renderAll();
   } else if (tab === "awards") state.awWant = +p.get("id") || null;
+  else if (tab === "picks") state.pkTheme = p.get("theme");
   else if (tab === "stats") { state.stYear = +p.get("y") || null; state.stReview = +p.get("r") || null; }
   await showTab(tab);
   if (tab === "quiz" && p.get("mode") === "read") document.getElementById("qz-mode-read").click();
@@ -1598,6 +1669,7 @@ async function showTab(tab) {
   document.getElementById("tab-" + tab).classList.add("active");
   saveHash();
   if (tab === "awards") await openAwards();
+  if (tab === "picks") await openPicks();
   if (tab === "suggest") await openSuggest();
   if (tab === "quiz") await openQuiz();
   if (tab === "stats") renderStats();
