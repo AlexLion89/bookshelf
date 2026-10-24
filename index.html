@@ -19,20 +19,23 @@
   <h1>📚 Книжная полка Alex Lion <span id="owner-badge" hidden>· режим владельца</span> <button id="pending" class="pending" type="button" hidden></button></h1>
   <button id="theme" class="theme" type="button"></button>
   <button id="share" class="share" type="button" title="Скопировать ссылку на то, что сейчас на экране">🔗<span> Поделиться</span></button>
+  <!-- На телефоне вкладки — панель внизу: значок (data-icon) и короткая подпись (data-short), остальное — в «Ещё». -->
   <nav>
-    <button data-tab="pick" class="active">Подобрать</button>
-    <button data-tab="like">Похоже на…</button>
-    <button data-tab="all">Все книги</button>
-    <button data-tab="fav">Любимое</button>
-    <button data-tab="me" id="me-btn" hidden>Мне почитать</button>
-    <button data-tab="picks" id="picks-btn" hidden>Новинки и подборки</button>
-    <button data-tab="dice">🎲 Книга дня</button>
-    <button data-tab="stats">Статистика</button>
-    <button data-tab="awards">Премии</button>
-    <button data-tab="suggest">Предложить книгу</button>
-    <button data-tab="quiz">Квизы</button>
+    <button data-tab="pick" data-icon="🔍" class="active">Подобрать</button>
+    <button data-tab="like" data-icon="🔁" data-short="Похожее">Похоже на…</button>
+    <button data-tab="all" data-icon="📚">Все книги</button>
+    <button data-tab="fav" data-icon="❤️">Любимое</button>
+    <button data-tab="me" data-icon="📖" data-short="Почитать" id="me-btn" hidden>Мне почитать</button>
+    <button data-tab="picks" data-icon="✨" data-short="Подборки" id="picks-btn" hidden>Новинки и подборки</button>
+    <button data-tab="dice" data-icon="🎲" data-short="Книга дня">🎲 Книга дня</button>
+    <button data-tab="stats" data-icon="📊">Статистика</button>
+    <button data-tab="awards" data-icon="🏆">Премии</button>
+    <button data-tab="suggest" data-icon="💬" data-short="Предложить">Предложить книгу</button>
+    <button data-tab="quiz" data-icon="❓">Квизы</button>
+    <button id="nav-more" class="nav-more" type="button" data-icon="☰" data-short="Ещё" aria-haspopup="dialog">Ещё</button>
   </nav>
 </header>
+<dialog id="nav-sheet" class="nav-sheet" aria-label="Все разделы" tabindex="-1"></dialog>
 
 <main>
   <section id="tab-pick" class="tab active">
@@ -63,6 +66,7 @@
     <input id="like-search" type="search" placeholder="Начните вводить название или автора…" autocomplete="off">
     <div id="like-suggest" class="suggest"></div>
     <div id="like-chosen" class="chips chosen"></div>
+    <div id="like-starters" class="starters"></div>
     <div id="like-list" class="list"></div>
   </section>
 
@@ -77,6 +81,7 @@
         <option value="rating">по оценке</option>
         <option value="year">по году написания</option>
       </select></label>
+      <label class="aw-only"><input type="checkbox" id="all-covers"> обложки</label>
     </div>
     <div id="all-count" class="count"></div>
     <div id="all-list" class="list"></div>
@@ -85,6 +90,7 @@
 
   <section id="tab-fav" class="tab">
     <div id="fav-modes" class="chips"></div>
+    <label class="aw-only" id="fav-covers-l"><input type="checkbox" id="fav-covers"> обложки</label>
     <div id="fav-count" class="count"></div>
     <div id="fav-list" class="list"></div>
   </section>
@@ -130,8 +136,10 @@
   <section id="tab-stats" class="tab"><div id="stats"></div></section>
 
   <section id="tab-me" class="tab">
+    <!-- Владелец знает, как это устроено, — ему пояснение свёрнуто; гостю видно сразу (summary прячется). -->
+    <details id="me-how" class="how" open><summary>Как это работает</summary>
     <p class="hint" id="me-hint">Непрочитанное из четырёх источников — похожие на ваши пятёрки, лауреаты премий и списков лучших, частые в квизах, советы друзей — по близости к вашему вкусу. Источники можно включать и выключать.
-      «★ в план» откладывает книгу наверх, «✓ читал» и «✕ не то» прячут её. Отметки хранятся на сервере — видны с любого устройства и учитываются при пересчёте.</p>
+      «★ в план» откладывает книгу наверх, «✓ читал» и «✕ не то» прячут её. Отметки хранятся на сервере — видны с любого устройства и учитываются при пересчёте.</p></details>
     <div id="me-src" class="chips"></div>
     <div id="me-count" class="count"></div>
     <div id="me-add" class="me-add" hidden>

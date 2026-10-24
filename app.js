@@ -217,11 +217,16 @@ async function load() {
       document.getElementById("pk-hint").textContent = "Новые книги и тематические подборки по вкусу хозяина полки. Новинки — с FantLab: " +
         "только первое издание на русском, без переизданий.";
       btn.textContent = "Что почитать хозяину";
+      btn.dataset.short = "Хозяину";
       document.getElementById("me-hint").textContent = "Чего хозяин полки ещё не читал, но, судя по его пятёркам, должно понравиться. " +
         "Если хотите подарить книгу — начните отсюда: сверху то, что он сам собирается прочитать.";
       document.getElementById("me-plan-h").textContent = "Хозяин собирается прочитать";
     }
   }
+  const how = document.getElementById("me-how");
+  how.open = !owner;
+  how.classList.toggle("fold", owner);
+  paintNav();
   if (!state.lib.length) state.lib = await (await fetch(url)).json();
   if (state.me) renderMe();
   for (const b of state.lib) {
@@ -460,6 +465,7 @@ function renderLike() {
          () => { state.like = state.like.filter(y => y !== x); renderLike(); })));
   const list = document.getElementById("like-list");
   saveHash();
+  renderLikeStarters();
   const ready = state.like.filter(x => x.book);
   if (!ready.length) { list.replaceChildren(); return; }
   const profile = new Map();
@@ -485,6 +491,16 @@ function renderLike() {
     const why = explain(profile, b);
     return (b.fantlab && sim.has(b.fantlab) ? "FantLab советует как похожую. " : "") + why;
   });
+}
+// Пока ничего не выбрано — подсказки одним касанием: любимые книги, по одной на автора; набор меняется раз в день.
+function renderLikeStarters() {
+  const box = document.getElementById("like-starters");
+  if (state.like.length) { box.replaceChildren(); return; }
+  const day = dayKey(), hash = s => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 0), authors = new Set();
+  const picks = state.lib.filter(b => b.fav && b.title.length <= 30).sort((a, b) => hash(a.title + day) - hash(b.title + day))
+    .filter(b => !authors.has(b.authors[0]) && authors.add(b.authors[0])).slice(0, 8);
+  box.replaceChildren(...(picks.length ? [el("div", { class: "meta" }, "Например, из любимого:"),
+    el("div", { class: "chips" }, ...picks.map(b => chip(b.title, "", () => addLibraryLike(b))))] : []));
 }
 function explain(profile, b) {
   const common = [];
@@ -512,7 +528,8 @@ function renderAll(more) {
     .sort(ALL_SORT[document.getElementById("all-sort").value]);
   state.allShown = more === true ? state.allShown + ALL_PAGE : more === "keep" ? state.allShown : ALL_PAGE;
   document.getElementById("all-count").textContent = `Книг: ${res.length}` + (res.length > state.allShown ? ` · показаны первые ${state.allShown}` : "");
-  renderList("all-list", res.slice(0, state.allShown), q ? b => matchedContains(b, q) : null);
+  coversToggle("all-covers");
+  renderList("all-list", res.slice(0, state.allShown), q ? b => matchedContains(b, q) : null, showCovers());
   const btn = document.getElementById("all-more");
   saveHash();
   btn.hidden = res.length <= state.allShown;
@@ -568,35 +585,43 @@ function finishRec(r) {
 }
 // Где взять: поиск по названию и фамилии автора — прямых ссылок на книгу в магазинах у нас нет.
 const WHERE = [["Яндекс Книги", q => `https://books.yandex.ru/search?text=${q}`], ["ЛитРес", q => `https://www.litres.ru/search/?q=${q}`],
-  ["Лабиринт", q => `https://www.labirint.ru/search/${q}/`], ["отзывы на LiveLib", q => `https://www.livelib.ru/find/books/${q}`]];
+  ["Лабиринт", q => `https://www.labirint.ru/search/${q}/`], ["LiveLib", q => `https://www.livelib.ru/find/books/${q}`]];
 function whereEl(title, authors) {
   const q = encodeURIComponent([title, ((authors || [])[0] || "").split(/\s+/).pop()].filter(Boolean).join(" "));
   return el("div", { class: "where" }, "Где взять: ", ...WHERE.flatMap(([name, url], i) =>
-    [i ? " · " : "", el("a", { href: url(q), target: "_blank", rel: "noopener", onclick: e => e.stopPropagation() }, name)]));
+    [i ? " · " : "", el("a", { href: url(q), target: "_blank", rel: "noopener", title: name === "LiveLib" ? "отзывы на LiveLib" : null,
+      onclick: e => e.stopPropagation() }, name)]));
 }
-function recEl(r) {
+// Карточка непрочитанной книги. Аннотация FantLab — под «о книге»: «почему вам» короче и полезнее, а с обеими
+// карточка на телефоне выходила в полтора экрана. full === true — аннотация сразу (главная книга дня);
+// строго true, потому что .map(recEl) передаёт вторым аргументом индекс.
+function recEl(r, full) {
   const fl = `https://fantlab.ru/work${r.fantlab}`, mark = state.marks[r.fantlab];
   const note = r.continues ? `Цикл «${r.continues}» у вас начат` : r.start ? `Цикл «${r.cycle}» — начать с «${r.start}»` : "";
+  const why = r.why || r.why_auto || ((r.seeds || []).length ? "Советуют: " + r.seeds.slice(0, 3).join(", ") +
+    ((r.near || []).length ? ". Близко к: " + r.near.slice(0, 3).join(", ") : "") : "");
+  const about = !r.description ? null : full === true || !why ? el("div", { class: "s" }, r.description)
+    : el("details", { class: "about" }, el("summary", {}, "о книге"), el("div", { class: "s" }, r.description));
+  // У книги, которую читаешь, по делу три кнопки: дочитал, отложить обратно в план, бросил.
+  const btns = !state.owner ? null : mark && mark.v === "читаю" ? [
+    chip("✓ дочитал → BookMix", "on", () => finishRec(r)), chip("★ отложить", "", () => markRec(r, "план")),
+    chip("✕ бросил", "", () => markRec(r, "не то"))]
+    : Object.entries(MARK_BTN).map(([v, [off, on]]) => chip(mark && mark.v === v ? on : off, mark && mark.v === v ? "on" : "", () => markRec(r, v)));
   return el("div", { class: "book rec" },
     r.image ? el("img", { src: r.image, alt: "", loading: "lazy", referrerpolicy: "no-referrer" })
             : coverEl({ title: r.title, authors: r.authors }, "thumb"),
-    el("div", {},
+    el("div", { class: "rec-main" },
       el("div", { class: "t" }, el("a", { href: fl, target: "_blank", rel: "noopener" }, r.title)),
       el("div", { class: "a" }, r.authors.join(", "), r.year ? `, ${r.year}` : "", r.type ? ` · ${r.type}` : "",
         r.fl_rating ? ` · FantLab ${r.fl_rating} (${r.fl_voters})` : ""),
       note ? el("div", { class: "ser" }, "📚 ", note) : null,
       r.tag ? el("div", { class: "ser" }, r.tag) : null,
-      r.description ? el("div", { class: "s" }, r.description) : null,
       (r.awards || []).length || r.quiz_n ? el("div", { class: "ser" },
         ...(r.awards || []).slice(0, 3).map(x => "🏆 " + x + "  "), r.quiz_n ? `❓ в квизах: ${r.quiz_n}` : "") : null,
       ...(r.friends || []).filter(f => f.note).map(f => el("div", { class: "friend" }, "💬 ", el("b", {}, f.from), ": ", f.note)),
-      el("div", { class: "why" }, r.why || r.why_auto || ((r.seeds || []).length ? "Советуют: " + r.seeds.slice(0, 3).join(", ") +
-        ((r.near || []).length ? ". Близко к: " + r.near.slice(0, 3).join(", ") : "") : "")),
-      whereEl(r.title, r.authors),
-      state.owner ? el("div", { class: "recbtns" },
-        mark && mark.v === "читаю" ? chip("✓ дочитал → оценить на BookMix", "plus", () => finishRec(r)) : null,
-        ...Object.entries(MARK_BTN).map(([v, [off, on]]) =>
-          chip(mark && mark.v === v ? on : off, mark && mark.v === v ? "on" : "", () => markRec(r, v)))) : null));
+      el("div", { class: "why" }, why), about),
+    // Низ — во всю ширину карточки, под обложкой: так «где взять» и кнопки встают в одну строку каждая.
+    el("div", { class: "rec-foot" }, whereEl(r.title, r.authors), btns ? el("div", { class: "recbtns" }, ...btns) : null));
 }
 const ME_SRC = { similar: "📖 похожие на прочитанное", awards: "🏆 премии и списки лучших", quiz: "❓ частые в квизах", friends: "💬 советуют друзья" };
 function meSources() {
@@ -820,26 +845,40 @@ async function openAwards() {
 }
 const showCovers = () => localStorage.getItem("covers") === "1";
 // Плитка: обложка с полки, иначе превью FantLab, иначе цветной корешок с названием.
-function tile(title, author, img, h, link) {
+// person — лауреат-автор: круглый портрет, без фото — инициалы; year — подпись над названием.
+function tile(title, author, img, h, link, opts = {}) {
+  const blank = () => opts.person ? initialsEl(title) : coverEl({ title, authors: [author || ""] }, "tile-img");
   let pic;
-  if (h && h.b) pic = coverEl(h.b, "tile-img");
+  if (h && h.b && !opts.person) pic = coverEl(h.b, "tile-img");
   else if (img) {
     pic = el("img", { class: "tile-img", src: "https://fantlab.ru" + img, alt: "", loading: "lazy", referrerpolicy: "no-referrer" });
-    pic.addEventListener("error", () => pic.replaceWith(coverEl({ title, authors: [author || ""] }, "tile-img")));
-  } else pic = coverEl({ title, authors: [author || ""] }, "tile-img");
+    pic.addEventListener("error", () => pic.replaceWith(blank()));
+  } else pic = blank();
   const mark = h ? (h.b && h.b.fav ? "❤ " : "✓ ") : "";
   const onclick = h && h.b ? () => openCard(h.b) : link ? () => window.open(link, "_blank", "noopener") : null;
-  return el("div", { class: "tile" + (h ? " read" : ""), onclick }, pic,
+  return el("div", { class: "tile" + (h ? " read" : "") + (opts.person ? " person" : ""), onclick }, pic,
+    opts.year ? el("div", { class: "tile-y" }, opts.year) : null,
     el("div", { class: "tile-t" }, mark + title), author && author !== title ? el("div", { class: "tile-a" }, author) : null);
 }
-function coversToggle(id, rerender) {
+function initialsEl(name) {
+  const w = name.split(/\s+/).filter(Boolean);
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return el("div", { class: "tile-img ini", style: `background:hsl(${h} 30% 46%)` }, (w[0] || "")[0] + (w.length > 1 ? w[w.length - 1][0] : ""));
+}
+// «Обложки» — одна настройка на «Премии», «Все книги» и «Любимое»: переключили в одном месте — поменялось везде.
+function coversToggle(id) {
   const cb = document.getElementById(id);
   cb.checked = showCovers();
-  cb.onchange = () => { localStorage.setItem("covers", cb.checked ? "1" : "0"); rerender(); };
+  cb.onchange = () => {
+    localStorage.setItem("covers", cb.checked ? "1" : "0");
+    renderAll("keep"); renderFav();
+    if (state.awards) renderAwards();
+  };
 }
 function renderAwards() {
   const aws = state.awards, sections = [...new Set(aws.map(a => a.section))];
-  coversToggle("aw-covers", renderAwards);
+  coversToggle("aw-covers");
   document.getElementById("aw-sections").replaceChildren(...sections.map(sec => chip(sec, sec === state.awSection ? "on" : "", () => {
     state.awSection = sec; state.awId = aws.find(a => a.section === sec).id; renderAwards();
   })));
@@ -852,21 +891,21 @@ function renderAwards() {
   document.getElementById("aw-count").textContent = `${aw.name} (${aw.country}): ` +
     (aw.by_author ? `читали книги ${st.read} лауреатов из ${st.total}` : `прочитано ${st.read} из ${st.total}`) +
     (aw.nominations.length ? ` · номинация: ${aw.nominations.join(", ")}` : "");
-  const rows = [];
-  let year = null, grid = null;
+  // С обложками — одна сетка на весь список, год в подписи плитки: заголовок на каждый год ставил по плитке в ряд.
+  const rows = [], grid = el("div", { class: "tiles" + (aw.by_author ? " people" : "") });
+  if (covers) rows.push(grid);
+  let year = null;
   for (const it of [...aw.items].sort((a, b) => (b.y || 0) - (a.y || 0) || b.w - a.w)) {
     const h = awardHit(it), part = h ? 0 : partsRead(it);
     const partNote = part ? `прочитано томов: ${part} из ${it.parts.length}` : "";
     if (only && h) continue;
-    if (it.y !== year) {
-      year = it.y; rows.push(el("div", { class: "aw-year" }, year || "без года"));
-      if (covers) { grid = el("div", { class: "tiles" }); rows.push(grid); }
-    }
     const flLink = it.fl ? `https://fantlab.ru/work${it.fl}` : it.aid ? `https://fantlab.ru/autor${it.aid}` : null;
     if (covers) {
-      grid.append(tile(it.t || it.a, it.t ? [it.a, partNote].filter(Boolean).join(" · ") : (h && h.n ? `у вас книг: ${h.n}` : ""), it.img, h, flLink));
+      grid.append(tile(it.t || it.a, it.t ? [it.a, partNote].filter(Boolean).join(" · ") : (h && h.n ? `у вас книг: ${h.n}` : ""), it.img, h, flLink,
+        { person: !it.t, year: [it.y, it.w ? "" : "номинант"].filter(Boolean).join(" · ") }));
       continue;
     }
+    if (it.y !== year) { year = it.y; rows.push(el("div", { class: "aw-year" }, year || "без года")); }
     const name = it.t ? `«${it.t}» — ${it.a}` : it.a;
     const link = h && h.b ? el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(h.b); } }, name)
       : flLink ? el("a", { href: flLink, target: "_blank", rel: "noopener" }, name) : name;
@@ -1037,13 +1076,13 @@ function diceShown(entries) {
   return entries.filter(x => !x.a || x === first).sort((a, b) => b.at - a.at);
 }
 const diceActive = () => document.getElementById("tab-dice").classList.contains("active");
-function diceEl(x) {
+function diceEl(x, main) {
   if (x.s === "lib") {
     const b = state.lib.find(b => String(b.id) === x.id);
     return b && libEl(b, b => state.owner ? `Вы читали ${b.read ? dmy(b.read) : "давно"}` : `Хозяин полки поставил ${stars(b.rating)}${b.fav ? " и ❤" : ""}`);
   }
   const r = findRec(+x.id);
-  return r && recEl(r);
+  return r && recEl(r, main);
 }
 async function openDice() {
   state.diceBusy = !diceLog().some(x => x.d === dayKey());
@@ -1079,7 +1118,7 @@ function renderDice() {
   const log = diceLog(), day = dayKey(), todays = diceShown(log.filter(x => x.d === day)), main = todays[0];
   document.getElementById("dc-main").replaceChildren(...(main ? [
     el("div", { class: "dice-from" }, "Книга дня · выпало из: " + (diceLabel(main.f) || main.f)),
-    diceEl(main) || el("div", { class: "count" }, "Этой книги уже нет в данных сайта — бросьте ещё раз.")]
+    diceEl(main, true) || el("div", { class: "count" }, "Этой книги уже нет в данных сайта — бросьте ещё раз.")]
     : [el("div", { class: "count" }, state.diceBusy ? "Выбираю книгу дня…" : n ? "Сегодня ещё ничего не выпало." : "Выбирать не из чего — загляните в настройки ниже.")]));
   const rest = todays.slice(1).map(diceEl).filter(Boolean);
   document.getElementById("dc-today-h").hidden = !rest.length;
@@ -1450,8 +1489,13 @@ function renderStats() {
   const nav = el("div", { class: "chips st-nav" },
     chip("Вся полка", state.stReview ? "" : "on", () => { state.stReview = null; renderStats(); saveHash(); }),
     ...reviewYears().map(y => chip(`Итоги ${y}`, state.stReview === y ? "on" : "", () => { state.stReview = y; state.stYear = null; renderStats(); saveHash(); window.scrollTo(0, 0); })));
-  if (state.stReview) { renderReview(state.stReview, nav); return; }
-  renderShelfStats(nav);
+  if (state.stReview) renderReview(state.stReview, nav); else renderShelfStats(nav);
+  scrollToChip(nav, nav.querySelector(".chip.on"));
+}
+// Ряд, который на телефоне листается вбок (вкладки, годы итогов): выбранное — посередине, а не за краем.
+function scrollToChip(row, item) {
+  if (!item || row.scrollWidth <= row.clientWidth) return;
+  row.scrollLeft += item.getBoundingClientRect().left - row.getBoundingClientRect().left - (row.clientWidth - item.offsetWidth) / 2;
 }
 
 // Итоги года — только для лет дневника: раньше месяцы и годы помнятся приблизительно.
@@ -1634,7 +1678,7 @@ function filterParams(f) {
   return p;
 }
 function hashFor() {
-  const tab = (document.querySelector("nav button.active") || {}).dataset?.tab || "pick";
+  const tab = (document.querySelector("nav button[data-tab].active") || {}).dataset?.tab || "pick";
   let p = new URLSearchParams();
   if (tab === "pick") {
     const q = document.getElementById("ask").value.trim(), fp = filterParams(state.pick);
@@ -1768,8 +1812,12 @@ function libEl(b, extra) {
       el("div", { class: "s" }, b.summary),
       el("div", { class: "why" }, extra ? extra(b) : b.why)));
 }
-function renderList(id, books, extra) {
-  document.getElementById(id).replaceChildren(...books.map(b => libEl(b, extra)));
+// covers — сеткой обложек (как полка), нажатие открывает ту же карточку книги.
+function renderList(id, books, extra, covers) {
+  const box = document.getElementById(id);
+  box.className = covers ? "tiles" : "list";
+  box.replaceChildren(...books.map(b => covers ? el("div", { class: "tile", onclick: () => openCard(b) }, coverEl(b, "tile-img"),
+    el("div", { class: "tile-t" }, (b.fav ? "❤ " : "") + b.title), el("div", { class: "tile-a" }, b.authors[0] || "")) : libEl(b, extra)));
 }
 function seriesBlock(b) {
   const books = seriesBooks(b.series.name);
@@ -1786,10 +1834,12 @@ function renderFav() {
   document.getElementById("fav-modes").replaceChildren(
     chip("Книги", mode === "books" ? "on" : "", () => { state.favMode = "books"; renderFav(); }),
     chip("Авторы", mode === "authors" ? "on" : "", () => { state.favMode = "authors"; renderFav(); }));
-  if (mode === "authors") { renderFavAuthors(); return; }
+  document.getElementById("fav-covers-l").hidden = mode === "authors";
+  coversToggle("fav-covers");
+  if (mode === "authors") { document.getElementById("fav-list").className = "list"; renderFavAuthors(); return; }
   const favs = state.lib.filter(b => b.fav).sort((a, b) => (a.authors[0] || "").localeCompare(b.authors[0] || "") || a.title.localeCompare(b.title));
   document.getElementById("fav-count").textContent = `Любимых книг: ${favs.length}` + (state.owner ? ". ❤ ставится и снимается в карточке книги." : "");
-  renderList("fav-list", favs);
+  renderList("fav-list", favs, null, showCovers());
 }
 // Номинации авторов. Общий рейтинг держится на числе любимых книг; сколько прочитано — лишь небольшая
 // прибавка, иначе наверх выходят авторы, которых владелец прочитал почти целиком (Вудхаус, Твен, По).
@@ -1865,13 +1915,55 @@ function openCard(b) {
   if (!dlg.open) dlg.showModal();
 }
 
+// ---------- вкладки ----------
+// На телефоне вкладки — панель внизу экрана (CSS): четыре главные (.prio) и «Ещё» с остальными. Главные у владельца
+// и у гостя свои; если какой-то нет (не загрузился me.json), место занимает следующая по порядку.
+const NAV_MAIN = { owner: ["pick", "me", "picks", "all"], guest: ["pick", "all", "me", "suggest"] };
+const navButtons = () => [...document.querySelectorAll("nav button[data-tab]")];
+const navLabel = b => b.textContent.replace(b.dataset.icon, "").trim();
+function paintNav() {
+  const shown = navButtons().filter(b => !b.hidden).map(b => b.dataset.tab);
+  const main = NAV_MAIN[state.owner ? "owner" : "guest"].filter(t => shown.includes(t));
+  for (const t of shown) if (main.length < 4 && !main.includes(t)) main.push(t);
+  for (const b of navButtons()) {
+    b.classList.toggle("prio", main.includes(b.dataset.tab));
+    b.style.setProperty("--o", main.indexOf(b.dataset.tab));   // порядок в нижней панели — как в NAV_MAIN, не как в разметке
+    if (!b.dataset.short) b.dataset.short = navLabel(b);
+  }
+  paintMore();
+}
+// Открыта вкладка из «Ещё» — кнопка «Ещё» подсвечена и показывает её значок и название.
+function paintMore() {
+  const more = document.getElementById("nav-more"), cur = document.querySelector("nav button[data-tab].active");
+  const away = !!cur && !cur.classList.contains("prio");
+  more.classList.toggle("active", away);
+  more.dataset.icon = away ? cur.dataset.icon : "☰";
+  more.dataset.short = away ? cur.dataset.short : "Ещё";
+}
+const navSheet = document.getElementById("nav-sheet");
+document.getElementById("nav-more").addEventListener("click", () => {
+  navSheet.replaceChildren(el("div", { class: "sheet-grid" }, ...navButtons().filter(b => !b.hidden && !b.classList.contains("prio")).map(b =>
+    el("button", { class: "sheet-btn" + (b.classList.contains("active") ? " on" : ""), type: "button",
+      onclick: () => { navSheet.close(); goTab(b.dataset.tab); } }, el("span", { class: "sheet-i" }, b.dataset.icon), navLabel(b)))));
+  navSheet.showModal();
+  navSheet.focus();   // фокус — на панель, не на первую кнопку: иначе та в рамке и выглядит выбранной
+});
+navSheet.addEventListener("click", e => { if (e.target === navSheet) navSheet.close(); });
+// Переход по вкладке — с начала страницы: иначе новая вкладка открывается на середине, где была прокрутка старой.
+function goTab(tab) { showTab(tab); window.scrollTo(0, 0); }
+paintNav();
+
 // ---------- события ----------
 async function showTab(tab) {
   hideTip();
   document.querySelectorAll("nav button, .tab").forEach(x => x.classList.remove("active"));
-  document.querySelector(`nav button[data-tab="${tab}"]`).classList.add("active");
+  const btn = document.querySelector(`nav button[data-tab="${tab}"]`);
+  btn.classList.add("active");
   document.getElementById("tab-" + tab).classList.add("active");
+  paintMore();
+  scrollToChip(btn.parentElement, btn);   // узкое окно компьютера: лента вкладок прокручивается
   saveHash();
+  if (tab === "like") renderLike();
   if (tab === "awards") await openAwards();
   if (tab === "picks") await openPicks();
   if (tab === "dice") await openDice();
@@ -1879,7 +1971,7 @@ async function showTab(tab) {
   if (tab === "quiz") await openQuiz();
   if (tab === "stats") renderStats();
 }
-document.querySelectorAll("nav button").forEach(btn => btn.addEventListener("click", () => showTab(btn.dataset.tab)));
+navButtons().forEach(btn => btn.addEventListener("click", () => goTab(btn.dataset.tab)));
 let askTimer;
 document.getElementById("ask").addEventListener("input", e => {
   clearTimeout(askTimer);

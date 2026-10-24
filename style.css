@@ -16,8 +16,9 @@ header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bot
          padding: max(10px, env(safe-area-inset-top)) 14px 0; }
 h1 { font-size: 19px; margin: 0 0 8px; }
 #owner-badge { font-size: 13px; color: var(--muted); font-weight: normal; }
-nav { display: flex; gap: 4px; overflow-x: auto; }
-nav button { border: 0; background: none; padding: 8px 12px; font: inherit; color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
+nav { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+nav button { border: 0; background: none; padding: 8px 10px; font: inherit; font-size: 15px; color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
+nav .nav-more { display: none; }
 nav button.active { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
 main { max-width: 980px; margin: 0 auto; padding: 12px 14px 60px; }
 .tab { display: none; } .tab.active { display: block; }
@@ -208,3 +209,55 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .dice-day { font-weight: 600; margin: 12px 2px 6px; color: var(--muted); }
 .where { font-size: 12px; color: var(--muted); margin-top: 4px; }
 .where a { color: var(--muted); }
+
+/* карточка непрочитанной книги: низ («где взять» и кнопки) — во всю ширину, под обложкой */
+.book.rec { flex-wrap: wrap; row-gap: 6px; align-content: space-between; }   /* в сетке кнопки соседних карточек — на одной высоте */
+.rec-main { flex: 1 1 0; min-width: 0; }
+.rec-foot { flex: 1 0 100%; min-width: 0; }
+.rec-foot .where { margin-top: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rec-foot .recbtns { margin-top: 6px; }
+.about summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 4px; width: max-content; }
+.about[open] .s { display: block; }
+/* «Мне почитать»: владельцу пояснение свёрнуто, гостю — открыто и без заголовка */
+.how > summary { cursor: pointer; color: var(--muted); font-size: 14px; margin: 2px 2px 8px; width: max-content; }
+.how:not(.fold) > summary { display: none; }
+/* «Похоже на…»: подсказки, пока ничего не выбрано */
+.starters { margin: 12px 2px; } .starters .chips { margin-top: 6px; }
+/* премии и полка обложками */
+.tile-y { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.tile-y + .tile-t { margin-top: 0; }
+.tiles.people { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); }
+.tile.person { text-align: center; }
+.tile.person .tile-img { width: 72px; height: 72px; aspect-ratio: auto; margin: 0 auto; border-radius: 50%; object-fit: cover; object-position: center 25%; }
+.tile-img.ini { display: flex; align-items: center; justify-content: center; color: #fff; font-size: 24px; font-weight: 600; letter-spacing: 1px; }
+/* выдвижная панель «Ещё» */
+dialog.nav-sheet:focus { outline: none; }
+dialog.nav-sheet { margin: auto 0 0; width: 100%; max-width: 100%; border-radius: 16px 16px 0 0; padding: 14px 12px calc(14px + env(safe-area-inset-bottom)); }
+.sheet-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.sheet-btn { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; cursor: pointer; }
+.sheet-btn.on { border-color: var(--accent); background: var(--accent-soft); }
+.sheet-i { font-size: 24px; line-height: 1.2; }
+
+/* Телефон: вкладки — панелью внизу экрана (значок и короткая подпись), шапка уезжает при прокрутке. */
+@media (max-width: 760px) {
+  header { position: relative; padding-bottom: 8px; }
+  h1 { margin: 0; font-size: 18px; white-space: nowrap; }
+  #owner-badge { font-size: 0; } #owner-badge::after { content: "🔑"; font-size: 14px; }
+  .pending { position: fixed; z-index: 9; top: max(8px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); }
+  nav { position: fixed; z-index: 8; left: 0; right: 0; bottom: 0; gap: 0; overflow: visible; background: var(--card); border-top: 1px solid var(--line); padding: 0 2px env(safe-area-inset-bottom); }
+  nav button { display: none; flex: 1 1 0; min-width: 0; flex-direction: column; align-items: center; padding: 5px 2px 4px; font-size: 0; border-bottom: 0; border-top: 2px solid transparent; }
+  nav button.prio, nav .nav-more { display: flex; }
+  nav button.prio { order: var(--o); } nav .nav-more { order: 9; }
+  nav button::before { content: attr(data-icon); font-size: 20px; line-height: 26px; filter: grayscale(1); opacity: .6; }
+  nav button::after { content: attr(data-short); font-size: 11px; line-height: 14px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  nav button.active { border-top-color: var(--accent); color: var(--accent); }
+  nav button.active::before { filter: none; opacity: 1; }
+  footer { padding-bottom: calc(80px + env(safe-area-inset-bottom)); }
+  .toast { bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .st-nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+  .st-nav .chip { flex: none; }
+}
+/* Узкий экран: подписи полос в статистике — над полосой, иначе «Россия и бывший СССР» обрезается до «Россия и бы…». */
+@media (max-width: 560px) {
+  .hb-row { grid-template-columns: 1fr; gap: 1px; padding: 4px 0; }
+}
