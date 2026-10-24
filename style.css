@@ -222,6 +222,7 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .rec-main { flex: 1 1 0; min-width: 0; }
 .rec-foot { flex: 1 0 100%; min-width: 0; }
 .rec-foot .where { margin-top: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.where.free { color: var(--plus); white-space: normal; } .where.free a { color: var(--plus); } .where.free .meta { font-size: 12px; }
 .rec-foot .recbtns { margin-top: 6px; }
 .about summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 4px; width: max-content; }
 .about[open] .s { display: block; }

@@ -621,6 +621,20 @@ function whereEl(title, authors) {
     [i ? " · " : "", el("a", { href: url(q), target: "_blank", rel: "noopener", title: name === "LiveLib" ? "отзывы на LiveLib" : null,
       onclick: e => e.stopPropagation() }, name)]));
 }
+// Общественное достояние (ГК РФ, ст. 1281): через 70 лет после смерти автора, с 1 января следующего года; кто жил
+// и работал в годы Великой Отечественной — ещё 4 года (с запасом — всем, кто умер в 1941-м и позже). died — год смерти
+// последнего из авторов (fetch_authors.py); года нет — автор жив или неизвестно, ничего не обещаем.
+const isPublic = died => !!died && new Date().getFullYear() > died + 70 + (died >= 1941 ? 4 : 0);
+// Где взять свободную книгу: Викитека (у каждого текста — «Скачать EPUB») и Национальная электронная библиотека.
+// У переводной книги свободен оригинал, а перевод — только старый: Викитека выкладывает лишь такие.
+function freeEl(b) {
+  if (!b || !isPublic(b.died)) return null;
+  const q = encodeURIComponent([b.title, ((b.authors || [])[0] || "").split(/\s+/).pop()].filter(Boolean).join(" "));
+  const link = (href, text) => el("a", { href, target: "_blank", rel: "noopener", onclick: e => e.stopPropagation() }, text);
+  return el("div", { class: "where free" }, "🆓 Бесплатно и легально: ",
+    link(`https://ru.wikisource.org/w/index.php?search=${q}`, "Викитека (EPUB)"), " · ", link(`https://rusneb.ru/search/?q=${q}`, "НЭБ"),
+    el("span", { class: "meta" }, b.lang && b.lang !== "ru" ? " — автор умер в " + b.died + ", ищите старый перевод" : " — автор умер в " + b.died));
+}
 // Карточка непрочитанной книги. Аннотация FantLab — под «о книге»: «почему вам» короче и полезнее, а с обеими
 // карточка на телефоне выходила в полтора экрана. full === true — аннотация сразу (главная книга дня);
 // строго true, потому что .map(recEl) передаёт вторым аргументом индекс.
@@ -658,7 +672,7 @@ function recEl(r, full) {
       ...(r.friends || []).filter(f => f.note).map(f => el("div", { class: "friend" }, "💬 ", el("b", {}, f.from), ": ", f.note)),
       el("div", { class: "why" }, why), about),
     // Низ — во всю ширину карточки, под обложкой: так «где взять» и кнопки встают в одну строку каждая.
-    el("div", { class: "rec-foot" }, whereEl(r.title, r.authors), btns.length ? btnBox : null));
+    el("div", { class: "rec-foot" }, whereEl(r.title, r.authors), freeEl(r), btns.length ? btnBox : null));
 }
 // Фильтр рекомендаций: все или один источник, с числом книг на кнопке. Не запоминается — каждый заход со всех:
 // раньше кнопки выключали источники и выбор хранился на устройстве, и «только друзья» (там пусто — совет уже
@@ -771,10 +785,11 @@ document.getElementById("me-add-search").addEventListener("input", e => {
 function renderMe() {
   const marks = state.marks, src = state.meSrc || null;
   const unmarked = state.me.fresh.filter(r => !marks[r.fantlab]);
-  const inSrc = k => unmarked.filter(r => recSrc(r).includes(k));
+  // «🆓 бесплатно» — не источник, а свойство: общественное достояние, можно взять легально и даром.
+  const inSrc = k => unmarked.filter(r => k === "free" ? isPublic(r.died) : recSrc(r).includes(k));
   const srcBox = document.getElementById("me-src");
   srcBox.replaceChildren(chip(`Все · ${unmarked.length}`, src ? "" : "on", () => { state.meSrc = null; renderMe(); }),
-    ...Object.entries(ME_SRC).map(([k, label]) => chip(`${label} · ${inSrc(k).length}`, src === k ? "on" : "", () => {
+    ...Object.entries({ ...ME_SRC, free: "🆓 бесплатно" }).map(([k, label]) => chip(`${label} · ${inSrc(k).length}`, src === k ? "on" : "", () => {
       state.meSrc = src === k ? null : k; renderMe();   // повторное нажатие — снова все
     })));
   scrollToChip(srcBox, srcBox.querySelector(".chip.on"));
@@ -2133,7 +2148,7 @@ function openCard(b) {
     el("p", { class: "meta" }, el("a", { href: `https://bookmix.ru/book.phtml?id=${b.id}`, target: "_blank", rel: "noopener" }, "на BookMix"),
       b.fantlab ? [" · ", el("a", { href: `https://fantlab.ru/work${b.fantlab}`, target: "_blank", rel: "noopener" }, "на FantLab")] : null,
       " · ", el("a", { href: "#", onclick: e => { e.preventDefault(); shareLink(location.origin + location.pathname + hashFor()); } }, "🔗 ссылка на книгу")),
-    whereEl(b.title, b.authors)));
+    whereEl(b.title, b.authors), freeEl(b)));
   state.cardId = b.id;
   saveHash();
   if (!dlg.open) dlg.showModal();
