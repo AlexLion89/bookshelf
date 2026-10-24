@@ -743,10 +743,16 @@ function awardHit(it) {
   if (!b && q.size) b = (ix.bySur.get(s) || []).find(x => x._tk.some(t => titleLike(q, t, false)));
   // Автор у книг из квизов угадан по соседству в тексте вопроса — длинному названию верим и без него.
   // Без автора сравниваем полные слова: по первым пяти буквам «Маленькая принцесса» = «Маленький принц».
+  // Разные id FantLab — разные произведения: «Снежная королева» Виндж — не сказка Андерсена.
   if (!b && q.size >= 2) {
     const qf = toks(it.t, 99);
     const rare = [...q].map(w => ix.byTok.get(w) || new Set()).sort((x, y) => x.size - y.size)[0];
-    b = [...rare].find(x => x._tkf.some(t => titleLike(qf, t, true)));
+    b = [...rare].find(x => !(it.fl && x.fantlab && x.fantlab !== it.fl) && x._tkf.some(t => titleLike(qf, t, true)));
+  }
+  // Цикл в списке («Тёмные начала») засчитан, когда прочитаны все основные тома.
+  if (!b && it.parts) {
+    const got = it.parts.map(p => awardHit({ t: p.t, a: it.a, fl: p.fl }));
+    if (got.every(h => h && h.b)) b = got[0].b;
   }
   const res = b ? { b } : null;
   ix.memo.set(key, res);
