@@ -645,6 +645,28 @@ function renderNowReading() {
       r.image ? el("img", { src: r.image, alt: "", referrerpolicy: "no-referrer" }) : coverEl({ title: r.title, authors: r.authors }, "nr-cover"),
       el("span", {}, el("b", {}, r.title), (r.authors || []).length ? el("span", { class: "meta" }, " — " + r.authors.join(", ")) : null))));
 }
+// «В планах» — обложки в один ряд, листаются вбок: сколько бы книг ни было, места полка занимает столько же.
+// Нажатие на обложку раскрывает под рядом полную карточку с кнопками, повторное — сворачивает.
+function renderPlan(plan) {
+  const box = document.getElementById("me-plan"), old = box.querySelector(".shelf-row"), x = old ? old.scrollLeft : 0;
+  if (!plan.some(r => r.fantlab === state.planOpen)) state.planOpen = null;
+  const row = el("div", { class: "shelf-row" }, ...plan.map(r => el("button", {
+    class: "tile shelf-tile" + (r.fantlab === state.planOpen ? " on" : ""), "aria-expanded": String(r.fantlab === state.planOpen),
+    onclick: () => { state.planOpen = state.planOpen === r.fantlab ? null : r.fantlab; renderPlan(plan); } },
+  r.image ? el("img", { class: "tile-img", src: r.image, alt: "", loading: "lazy", referrerpolicy: "no-referrer" })
+    : coverEl({ title: r.title, authors: r.authors }, "tile-img"),
+  el("div", { class: "tile-t" }, r.title), el("div", { class: "tile-a" }, r.authors[0] || ""))));
+  // Стрелки — для мыши (на телефоне ряд листают пальцем) и только туда, куда ещё есть что листать.
+  const arrow = d => el("button", { class: "shelf-arrow " + (d < 0 ? "prev" : "next"), "aria-label": d < 0 ? "назад" : "дальше",
+    onclick: () => row.scrollBy({ left: d * row.clientWidth * 0.8, behavior: "smooth" }) }, d < 0 ? "‹" : "›");
+  const prev = arrow(-1), next = arrow(1);
+  const arrows = () => { prev.hidden = row.scrollLeft < 4; next.hidden = row.scrollLeft + row.clientWidth > row.scrollWidth - 4; };
+  row.addEventListener("scroll", arrows, { passive: true });
+  new ResizeObserver(arrows).observe(row);   // ряд рисуется и на скрытой вкладке — размеры появятся, когда её откроют
+  const open = plan.find(r => r.fantlab === state.planOpen);
+  box.replaceChildren(el("div", { class: "shelf" }, row, prev, next), open ? recEl(open) : null);
+  row.scrollLeft = x;   // перерисовка (отметка, подтянутая обложка) не сбрасывает ряд в начало
+}
 // Отметить книгу, которой нет в рекомендациях: поиск по FantLab.
 let meAddTimer;
 document.getElementById("me-add-search").addEventListener("input", e => {
@@ -683,8 +705,10 @@ function renderMe() {
   const reading = markedRecs("читаю"), plan = markedRecs("план");
   document.getElementById("me-reading-h").hidden = !reading.length;
   document.getElementById("me-reading").replaceChildren(...reading.map(recEl));
-  document.getElementById("me-plan-h").hidden = !plan.length;
-  document.getElementById("me-plan").replaceChildren(...plan.map(recEl));
+  const planH = document.getElementById("me-plan-h");
+  planH.hidden = !plan.length;
+  planH.dataset.n = plan.length;
+  renderPlan(plan);
   document.getElementById("me-add").hidden = !state.owner;
   renderNowReading();
   // Старый me.json без src — всё считается «похожими».
@@ -1339,6 +1363,13 @@ function tipEl() {
   if (!t) { t = el("div", { id: "tip", class: "tip", role: "tooltip", hidden: "" }); document.body.append(t); }
   return t;
 }
+const hideTip = () => { const t = document.getElementById("tip"); if (t) t.hidden = true; };
+// Подсказка висит поверх страницы (position: fixed) — уходит при любом касании, прокрутке и смене вкладки.
+document.addEventListener("pointerdown", hideTip, true);
+addEventListener("scroll", hideTip, { capture: true, passive: true });
+addEventListener("resize", hideTip);
+// Мышь — наведением. Палец — касанием, до следующего касания. Фокус — только клавиатурный: от касания iOS
+// ставит фокус на столбик и не снимает его, когда нажимают вкладку, — подсказка висела на других вкладках.
 function withTip(node, lines) {
   node.tabIndex = 0;
   node.setAttribute("aria-label", lines.join(". "));
@@ -1350,9 +1381,11 @@ function withTip(node, lines) {
     t.style.left = Math.min(innerWidth - t.offsetWidth - 8, Math.max(8, x - t.offsetWidth / 2)) + "px";
     t.style.top = (y - t.offsetHeight - 14 < 8 ? y + 18 : y - t.offsetHeight - 14) + "px";
   };
-  const hide = () => { tipEl().hidden = true; };
-  node.addEventListener("pointermove", show); node.addEventListener("focus", () => show());
-  node.addEventListener("pointerleave", hide); node.addEventListener("blur", hide);
+  node.addEventListener("pointermove", e => { if (e.pointerType !== "touch") show(e); });
+  node.addEventListener("pointerleave", e => { if (e.pointerType !== "touch") hideTip(); });
+  node.addEventListener("pointerup", e => { if (e.pointerType === "touch") show(e); });
+  node.addEventListener("focus", () => { if (node.matches(":focus-visible")) show(); });
+  node.addEventListener("blur", hideTip);
   return node;
 }
 function niceTicks(max) {
@@ -1833,6 +1866,7 @@ function openCard(b) {
 
 // ---------- события ----------
 async function showTab(tab) {
+  hideTip();
   document.querySelectorAll("nav button, .tab").forEach(x => x.classList.remove("active"));
   document.querySelector(`nav button[data-tab="${tab}"]`).classList.add("active");
   document.getElementById("tab-" + tab).classList.add("active");

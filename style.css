@@ -173,6 +173,19 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .nr-book { display: flex; align-items: center; gap: 8px; color: inherit; text-decoration: none; }
 .nr-book img, .nr-book .nr-cover { width: 28px; height: 42px; object-fit: cover; border-radius: 3px; flex: none; }
 .nocover.nr-cover { padding: 2px; font-size: 5px; }
+/* в планах: обложки в один ряд, листаются вбок; выбранная раскрывается карточкой под рядом */
+#me-plan-h::after { content: " · " attr(data-n); color: var(--muted); font-weight: 400; }
+.shelf { position: relative; }
+.shelf-row { display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x proximity; overscroll-behavior-x: contain; scrollbar-width: thin; padding: 5px 3px 8px; }
+.shelf-tile { flex: none; width: 96px; scroll-snap-align: start; background: none; border: 0; padding: 0; color: inherit; font-family: inherit; text-align: left; }
+.shelf-tile .tile-t { -webkit-line-clamp: 2; }
+.shelf-tile .tile-a { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shelf-tile.on .tile-img { outline: 3px solid var(--accent); outline-offset: 2px; }
+.shelf-tile.on .tile-t { color: var(--accent); }
+.shelf-arrow { position: absolute; top: 56px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--line); background: var(--card); color: var(--accent); font-size: 22px; line-height: 1; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+.shelf-arrow.prev { left: -6px; } .shelf-arrow.next { right: -6px; }
+@media (hover: none) { .shelf-arrow { display: none; } }
+#me-plan > .book { margin-top: 6px; max-width: 680px; }
 .me-add { margin: 10px 0 4px; }
 .me-add-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; cursor: default !important; }
 .me-add-row .recbtns { margin: 0; }
