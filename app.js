@@ -566,6 +566,14 @@ function finishRec(r) {
   markRec(r, "читал");
   toast("Поставьте оценку на BookMix — в понедельник книга приедет на полку");
 }
+// Где взять: поиск по названию и фамилии автора — прямых ссылок на книгу в магазинах у нас нет.
+const WHERE = [["Яндекс Книги", q => `https://books.yandex.ru/search?text=${q}`], ["ЛитРес", q => `https://www.litres.ru/search/?q=${q}`],
+  ["Лабиринт", q => `https://www.labirint.ru/search/${q}/`], ["отзывы на LiveLib", q => `https://www.livelib.ru/find/books/${q}`]];
+function whereEl(title, authors) {
+  const q = encodeURIComponent([title, ((authors || [])[0] || "").split(/\s+/).pop()].filter(Boolean).join(" "));
+  return el("div", { class: "where" }, "Где взять: ", ...WHERE.flatMap(([name, url], i) =>
+    [i ? " · " : "", el("a", { href: url(q), target: "_blank", rel: "noopener", onclick: e => e.stopPropagation() }, name)]));
+}
 function recEl(r) {
   const fl = `https://fantlab.ru/work${r.fantlab}`, mark = state.marks[r.fantlab];
   const note = r.continues ? `Цикл «${r.continues}» у вас начат` : r.start ? `Цикл «${r.cycle}» — начать с «${r.start}»` : "";
@@ -584,6 +592,7 @@ function recEl(r) {
       ...(r.friends || []).filter(f => f.note).map(f => el("div", { class: "friend" }, "💬 ", el("b", {}, f.from), ": ", f.note)),
       el("div", { class: "why" }, r.why || r.why_auto || ((r.seeds || []).length ? "Советуют: " + r.seeds.slice(0, 3).join(", ") +
         ((r.near || []).length ? ". Близко к: " + r.near.slice(0, 3).join(", ") : "") : "")),
+      whereEl(r.title, r.authors),
       state.owner ? el("div", { class: "recbtns" },
         mark && mark.v === "читаю" ? chip("✓ дочитал → оценить на BookMix", "plus", () => finishRec(r)) : null,
         ...Object.entries(MARK_BTN).map(([v, [off, on]]) =>
@@ -1815,7 +1824,8 @@ function openCard(b) {
     b.series ? seriesBlock(b) : null,
     el("p", { class: "meta" }, el("a", { href: `https://bookmix.ru/book.phtml?id=${b.id}`, target: "_blank", rel: "noopener" }, "на BookMix"),
       b.fantlab ? [" · ", el("a", { href: `https://fantlab.ru/work${b.fantlab}`, target: "_blank", rel: "noopener" }, "на FantLab")] : null,
-      " · ", el("a", { href: "#", onclick: e => { e.preventDefault(); shareLink(location.origin + location.pathname + hashFor()); } }, "🔗 ссылка на книгу"))));
+      " · ", el("a", { href: "#", onclick: e => { e.preventDefault(); shareLink(location.origin + location.pathname + hashFor()); } }, "🔗 ссылка на книгу")),
+    whereEl(b.title, b.authors)));
   state.cardId = b.id;
   saveHash();
   if (!dlg.open) dlg.showModal();
