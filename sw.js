@@ -3,7 +3,7 @@
 // и основные данные лежат в кэше своей версии (CACHE поднимает update.sh publish — и здесь, и в app.js): новая
 // версия скачивается целиком при установке и включается кнопкой «Обновить» (или при следующем запуске), так что
 // файлы разных версий не смешиваются — и чистить кэш вручную по-прежнему не нужно.
-const CACHE = "bookshelf-v56";
+const CACHE = "bookshelf-v57";
 const COVERS = "covers-v1";        // обложки: свои и FantLab — по адресу не меняются, хранятся между версиями
 const SCHEME = "scheme-cache-first";   // метка: этот Service Worker уже «из кэша» (см. install)
 const PRECACHE = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icon.svg", "icon-192.png",

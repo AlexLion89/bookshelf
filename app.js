@@ -2325,8 +2325,15 @@ function readsEl(b) {
     again ? el("div", { class: "meta" }, "🔁 Перечитана" + (x.d.length ? ": " + x.d.map(monthName).join(", ") : "") +
       (x.n ? (x.d.length ? ` и ещё ${plural(x.n, "раз", "раза", "раз")} без даты` : ` ${plural(x.n, "раз", "раза", "раз")}`) : "")) : null,
     x.now ? el("div", { class: "meta" }, "📖 Хозяин сейчас перечитывает") : null);
-  const month = (value, onchange, label) => el("input", { type: "month", class: "rr-month", value: value || "", max: thisMonth(), "aria-label": label,
-    onchange: e => e.target.value && onchange(e.target.value) });
+  // Месяц сохраняется, когда поле отпускают («Готово» на iPhone, клик мимо на компьютере), а не на каждый поворот
+  // барабана: iPhone присылает change при каждой прокрутке, и перерисовка карточки закрывала выбор после первого же
+  // движения (замечание 25.10.2026). Сохранение — следующим тиком: клик по «×» карточки успевает сработать.
+  const month = (value, save, label) => {
+    const inp = el("input", { type: "month", class: "rr-month", value: value || "", max: thisMonth(), "aria-label": label });
+    inp.addEventListener("blur", () => setTimeout(() => { if (inp.value && inp.value !== (value || "")) save(inp.value); }, 0));
+    inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
+    return inp;
+  };
   const row = (label, ...kids) => el("div", { class: "rr-row" }, el("span", { class: "rr-l" }, label), ...kids);
   return el("div", { class: "reads" }, head,
     row("Перечитывал:",
@@ -2549,7 +2556,7 @@ async function openFeedback() {
 // Сайт открывается из кэша своей версии (sw.js). Выкладка поднимает номер версии здесь и в sw.js; новая версия
 // ставится фоном и ждёт — плашка «Обновить» включает её (сообщение skip-waiting → смена Service Worker'а →
 // перезагрузка). Без Service Worker'а (тесты, старые браузеры) кнопка просто перезагружает страницу.
-const siteVer = "bookshelf-v56";
+const siteVer = "bookshelf-v57";
 let swReg = null, updating = false;
 const showUpdate = () => { document.getElementById("update-bar").hidden = false; };
 function applyUpdate() {
