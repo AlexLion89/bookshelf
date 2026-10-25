@@ -61,12 +61,11 @@ const API = "https://shelf-api.sirenyov.workers.dev";
 // Из мобильной сети соединение с Worker (Cloudflare) то медленное, то рвётся («Load failed», «Fetch is aborted»):
 // до 15 секунд на попытку и три попытки. Все записи, кроме нового предложения, можно безопасно повторить —
 // они ставят значение, а не добавляют.
-async function api(path, body) {
+async function api(path, body, { tries = body && path === "/suggest" ? 1 : 3, timeout = 15000 } = {}) {
   const key = localStorage.getItem("owner-key");
-  const tries = body && path === "/suggest" ? 1 : 3;
   let r;
   for (let i = 0; ; i++) {
-    const opt = { signal: AbortSignal.timeout(15000), headers: key ? { Authorization: "Bearer " + key } : {} };
+    const opt = { signal: AbortSignal.timeout(timeout), headers: key ? { Authorization: "Bearer " + key } : {} };
     if (body) Object.assign(opt, { method: "POST", body: JSON.stringify(body), headers: { ...opt.headers, "Content-Type": "application/json" } });
     try { r = await fetch(API + path, opt); break; } catch (e) {
       if (i + 1 >= tries) throw Object.assign(new Error("нет связи с сервером — попробуйте ещё раз"), { network: true });
@@ -75,6 +74,22 @@ async function api(path, body) {
   }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(d.error || "ошибка " + r.status), { status: r.status });
+  return d;
+}
+// Последний ответ сервера — в localStorage. Worker живёт на Cloudflare, а его в мобильных сетях России душат:
+// без кэша отметки, «Сейчас читаю» и советы друзей ждали ответа по полминуты (а то и до VPN). Теперь сайт сразу
+// рисует то, что видел в прошлый раз, а свежее догружает фоном — одна попытка, недолго; запись — через очередь.
+const API_CACHE = "api-cache";
+const apiCache = () => JSON.parse(localStorage.getItem(API_CACHE) || "{}");
+const cachedApi = path => (apiCache()[path] || {}).data;
+function cacheApi(path, data) {
+  const c = apiCache();
+  c[path] = { at: Date.now(), data };
+  try { localStorage.setItem(API_CACHE, JSON.stringify(c)); } catch { /* переполнен — обойдёмся без кэша */ }
+}
+async function apiGet(path) {
+  const d = await api(path, null, { tries: 1, timeout: 10000 });
+  cacheApi(path, d);
   return d;
 }
 // Запись от имени владельца: пароль спрашивается один раз и запоминается в браузере.
@@ -138,17 +153,21 @@ function paintPending() {
 }
 // Свежие отметки и ❤ с сервера; несохранённое из очереди накладывается сверху.
 async function refreshFromServer() {
-  const [m, fav, rr] = await Promise.all([api("/me").catch(() => null), api("/fav").catch(() => null), api("/reread").catch(() => null)]);
+  const [m, fav, rr] = await Promise.all([apiGet("/me").catch(() => null), apiGet("/fav").catch(() => null), apiGet("/reread").catch(() => null)]);
   state.synced = !!(m && fav);
   if (rr) { setRereads(rr); renderReads(); }   // старый Worker без /reread — 404, перечитываний просто нет
   if (m) { setMarks(m); if (state.me) renderMe(); else renderNowReading(); }
   if (fav) {
-    const on = new Set(fav.on), off = new Set(fav.off);
-    for (const x of pending()) if (x.path === "/fav") { on.delete(x.body.id); off.delete(x.body.id); (x.body.on ? on : off).add(x.body.id); }
-    for (const b of state.lib) if (on.has(b.id)) b.fav = true; else if (off.has(b.id)) b.fav = false;
+    applyFav(fav);
     renderPick(); renderFav(); renderAll("keep");
     if (document.getElementById("tab-stats").classList.contains("active")) renderStats();
   }
+}
+// ❤ с сервера поверх сборки; несохранённое из очереди — сверху.
+function applyFav(fav) {
+  const on = new Set(fav.on), off = new Set(fav.off);
+  for (const x of pending()) if (x.path === "/fav") { on.delete(x.body.id); off.delete(x.body.id); (x.body.on ? on : off).add(x.body.id); }
+  for (const b of state.lib) if (on.has(b.id)) b.fav = true; else if (off.has(b.id)) b.fav = false;
 }
 
 // Слово ищется с начала слова: основа «кот» не должна находить «который».
@@ -193,6 +212,7 @@ async function ownerLogin() {
 function ownerLogout() {
   localStorage.removeItem("owner");
   localStorage.removeItem("owner-key");
+  localStorage.removeItem(API_CACHE);   // в кэше — то, что сервер отдаёт владельцу (скрытые советы), гостю незачем
   location.replace(location.pathname + location.hash);   // без ?me — иначе режим включится снова
 }
 
@@ -233,7 +253,11 @@ async function load() {
   how.classList.toggle("fold", owner);
   paintNav();
   if (!state.lib.length) state.lib = await (await fetch(url)).json();
-  if (state.me) renderMe();
+  // Отметки, ❤ и перечитывания — сразу из прошлого ответа сервера: свежие догрузит refreshFromServer.
+  setMarks(cachedApi("/me") || {});
+  if (cachedApi("/fav")) applyFav(cachedApi("/fav"));
+  setRereads(cachedApi("/reread") || {});
+  if (state.me) renderMe(); else renderNowReading();
   for (const b of state.lib) {
     b._text = norm([b.title, b.bm_title, ...b.authors, b.orig, ...b.themes, ...(b.tags || []), ...b.genres, ...(b.contains || []),
                     b.series && b.series.name, b.series && b.series.sub].join(" | "));
@@ -754,6 +778,7 @@ function renderPlan(plan) {
   box.replaceChildren(el("div", { class: "shelf" }, row, prev, next));
   if (open) box.append(recEl({ ...open, _next: open === plan[0] }));   // не первой — кнопка «⤒ следующей»
   row.scrollLeft = x;   // перерисовка (отметка, подтянутая обложка) не сбрасывает ряд в начало
+  arrows();   // сразу, не дожидаясь ResizeObserver: он срабатывает на кадр позже, а в фоне вкладки — и того позже
 }
 // Отметить книгу, которой нет в рекомендациях: поиск по FantLab.
 let meAddTimer;
@@ -1215,11 +1240,16 @@ function renderDice() {
 function shelfMatch(title, author, fl) {
   return awardHit({ t: title, a: author || "", fl });
 }
+// Советы — сразу из прошлого ответа, свежий список фоном и не чаще раза в минуту: раньше каждый заход на вкладку
+// заново ждал сервер (в мобильной сети — до полуминуты).
 async function openSuggest() {
-  const box = document.getElementById("sg-list");
-  box.replaceChildren(el("div", { class: "count" }, "Загружаю…"));
-  try { state.sgList = await api("/suggest"); } catch { box.replaceChildren(el("div", { class: "count" }, "Список сейчас недоступен.")); return; }
-  renderSuggest();
+  // В памяти — свежее кэша: там уже ответы владельца, поставленные на этой странице.
+  const box = document.getElementById("sg-list"), cached = state.sgList || cachedApi("/suggest");
+  if (cached) { state.sgList = cached; renderSuggest(); } else box.replaceChildren(el("div", { class: "count" }, "Загружаю…"));
+  if (cached && Date.now() - (state.sgAt || 0) < 60000) return;
+  const fresh = apiGet("/suggest").then(d => { state.sgList = d; state.sgAt = Date.now(); renderSuggest(); })
+    .catch(() => { if (!cached) box.replaceChildren(el("div", { class: "count" }, "Список сейчас недоступен — нет связи с сервером. Попробуйте позже.")); });
+  if (!cached) await fresh;
 }
 function renderSuggest() {
   const box = document.getElementById("sg-list"), list = state.sgList;
