@@ -257,7 +257,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 /* перечитывания в карточке книги */
 .rr-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 8px; font-size: 14px; }
 .rr-l { min-width: 7.5em; color: var(--muted); }
-.rr-row .chip { padding: 0 11px; } .rr-date { display: inline-flex; align-items: center; gap: 2px; }
+.rr-row .chip { padding: 0 11px; }
+.rr-sel { font: inherit; font-size: 14px; padding: 3px 4px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); margin-right: 4px; } .rr-date { display: inline-flex; align-items: center; gap: 2px; }
 /* подсказка с «Отменить» */
 .toast { display: flex; align-items: center; gap: 12px; }
 .toast-act { border: 0; background: none; color: var(--accent-soft); font: inherit; font-weight: 600; cursor: pointer; padding: 0; text-decoration: underline; }

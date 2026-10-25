@@ -704,16 +704,23 @@ const ALL_SORT = {
   rating: (a, b) => (b.rating || 0) - (a.rating || 0) || (b.fav ? 1 : 0) - (a.fav ? 1 : 0) || (b.read || "").localeCompare(a.read || ""),
   year: (a, b) => (a.year || 9999) - (b.year || 9999),
 };
+// Перечитанные (и перечитываемые сейчас) — отдельным списком: удобно пройтись и поправить даты.
+const isReread = b => timesRead(b) > 1 || rereadingNow(b);
 function renderAll(more) {
-  const q = norm(document.getElementById("all-search").value).trim();
-  const res = (q ? state.lib.filter(b => q.split(/\s+/).every(w => b._text.includes(w))) : [...state.lib])
+  const q = norm(document.getElementById("all-search").value).trim(), onlyRr = document.getElementById("all-rr").checked;
+  let res = (q ? state.lib.filter(b => q.split(/\s+/).every(w => b._text.includes(w))) : [...state.lib])
     .sort(ALL_SORT[document.getElementById("all-sort").value]);
+  if (onlyRr) res = res.filter(isReread);
+  const rrN = state.lib.filter(isReread).length;
+  document.getElementById("all-rr-n").textContent = rrN ? ` · ${rrN}` : "";
   state.allShown = more === true ? state.allShown + ALL_PAGE : more === "keep" ? state.allShown : ALL_PAGE;
-  const [ib, iw] = q ? ["", ""] : hiddenNote();
-  document.getElementById("all-count").replaceChildren(`Книг: ${q ? res.length : shelfTotal()}`, ib,
+  const [ib, iw] = q || onlyRr ? ["", ""] : hiddenNote();
+  document.getElementById("all-count").replaceChildren(onlyRr ? `Перечитанных: ${res.length}` : `Книг: ${q ? res.length : shelfTotal()}`, ib,
     res.length > state.allShown ? ` · показаны первые ${state.allShown}` : "", iw);
   coversToggle("all-covers");
   renderList("all-list", res.slice(0, state.allShown), q ? b => matchedContains(b, q) : null, showCovers());
+  if (onlyRr && !res.length) document.getElementById("all-list").replaceChildren(el("div", { class: "count" },
+    q ? "Среди найденного перечитанных нет." : "Перечитанных пока нет — отметьте в карточке книги: «Перечитывал: +»."));
   const btn = document.getElementById("all-more");
   saveHash();
   btn.hidden = res.length <= state.allShown;
@@ -2294,6 +2301,8 @@ function setRereads(server) {
   state.rereads = JSON.parse(JSON.stringify(server || {}));
   for (const x of pending()) if (x.path === "/reread") applyReread(state.rereads, x.body.id, x.body);
 }
+// Поле «месяц» есть в Chrome, Edge, на iPhone и Android; в Firefox и Safari на компьютере — нет (state.noMonthInput — для тестов).
+const monthInputOk = () => { const t = document.createElement("input"); t.setAttribute("type", "month"); return t.type === "month" && !state.noMonthInput; };
 const rrEntry = b => { const x = state.rereads[b.id] || {}; return { d: [...(x.d || [])], n: x.n || 0, now: x.now ? 1 : 0 }; };
 // Перечитывания книги пишутся всей записью: «Отменить» в подсказке просто возвращает прежнюю — так чинится мисклик.
 function setReread(b, next, msg) {
@@ -2329,7 +2338,20 @@ function readsEl(b) {
   // барабана: iPhone присылает change при каждой прокрутке, и перерисовка карточки закрывала выбор после первого же
   // движения (замечание 25.10.2026). Сохранение — следующим тиком: клик по «×» карточки успевает сработать.
   const month = (value, save, label) => {
+    // Firefox и Safari на компьютере поля «месяц» не знают (выходит строка без календаря) — два списка: месяц и год.
+    if (!monthInputOk()) {
+      const [y0, m0] = (value || "").split("-"), y1 = new Date().getFullYear(), yFirst = Math.min(+((b.read || "").slice(0, 4)) || y1, y1);
+      const ms = el("select", { class: "rr-sel", "aria-label": label + ": месяц" }, el("option", { value: "" }, "месяц"),
+        ...MONTHS.map((n, i) => el("option", { value: String(i + 1).padStart(2, "0"), selected: m0 === String(i + 1).padStart(2, "0") ? "" : null }, n)));
+      const ys = el("select", { class: "rr-sel", "aria-label": label + ": год" }, el("option", { value: "" }, "год"),
+        ...Array.from({ length: y1 - yFirst + 1 }, (_, i) => String(y1 - i)).map(y => el("option", { value: y, selected: y === y0 ? "" : null }, y)));
+      const commit = () => { const v = ms.value && ys.value ? `${ys.value}-${ms.value}` : ""; if (v && v !== (value || "")) save(v); };
+      ms.addEventListener("change", commit); ys.addEventListener("change", commit);
+      return el("span", { class: "rr-pick" }, ms, ys);
+    }
     const inp = el("input", { type: "month", class: "rr-month", value: value || "", max: thisMonth(), "aria-label": label });
+    // В Chrome и Edge календарь открывается только по значку справа — открыть по клику в любое место поля.
+    if (!matchMedia("(pointer: coarse)").matches) inp.addEventListener("click", () => { try { inp.showPicker(); } catch { /* старый браузер */ } });
     inp.addEventListener("blur", () => setTimeout(() => { if (inp.value && inp.value !== (value || "")) save(inp.value); }, 0));
     inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
     return inp;
@@ -2480,6 +2502,7 @@ document.getElementById("reset").addEventListener("click", () => {
 });
 document.getElementById("all-search").addEventListener("input", () => renderAll());
 document.getElementById("all-sort").addEventListener("change", () => renderAll());
+document.getElementById("all-rr").addEventListener("change", () => renderAll());
 document.getElementById("all-more").addEventListener("click", () => renderAll(true));
 document.getElementById("aw-unread").addEventListener("change", renderAwards);
 let flTimer;
@@ -2556,7 +2579,7 @@ async function openFeedback() {
 // Сайт открывается из кэша своей версии (sw.js). Выкладка поднимает номер версии здесь и в sw.js; новая версия
 // ставится фоном и ждёт — плашка «Обновить» включает её (сообщение skip-waiting → смена Service Worker'а →
 // перезагрузка). Без Service Worker'а (тесты, старые браузеры) кнопка просто перезагружает страницу.
-const siteVer = "bookshelf-v57";
+const siteVer = "bookshelf-v58";
 let swReg = null, updating = false;
 const showUpdate = () => { document.getElementById("update-bar").hidden = false; };
 function applyUpdate() {
