@@ -252,6 +252,8 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 #fb .fb-send { margin: 10px 0 6px; }
 .fb-item { border-top: 1px solid var(--line); padding: 8px 0; } .fb-item.done { opacity: .75; }
 .fb-item .link { padding: 2px 0; font-size: 13px; color: var(--muted); }
+/* нет ключа данных — ниже плашки «новая версия», чтобы не перекрывали друг друга */
+.update-bar.gh-bar { top: calc(max(8px, env(safe-area-inset-top)) + 46px); }
 /* вышла новая версия сайта */
 .update-bar { position: fixed; z-index: 25; top: max(8px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px;
   background: var(--fg); color: var(--bg); border-radius: 999px; padding: 6px 8px 6px 16px; font-size: 14px; box-shadow: 0 4px 14px rgba(0,0,0,.2); white-space: nowrap; }

@@ -56,7 +56,8 @@ const THEME_SYNONYMS = [
 ];
 
 const state = { lib: [], vocab: {}, pick: emptyFilter(), like: [] };
-// Правки владельца (❤) и предложения друзей — Cloudflare Worker, исходник в bookshelf-data/worker.
+// Советы друзей — Cloudflare Worker (исходник в bookshelf-data/worker): гость пишет без ключа, для этого нужен сервер.
+// Данные владельца — приватный репозиторий GitHub (см. «данные владельца» ниже).
 const API = "https://shelf-api.sirenyov.workers.dev";
 // Из мобильной сети соединение с Worker (Cloudflare) то медленное, то рвётся («Load failed», «Fetch is aborted»):
 // до 15 секунд на попытку и три попытки. Все записи, кроме нового предложения, можно безопасно повторить —
@@ -92,12 +93,131 @@ async function apiGet(path) {
   cacheApi(path, d);
   return d;
 }
-// Запись от имени владельца: пароль спрашивается один раз и запоминается в браузере.
+// Ответ на совет друга — в Worker, его паролем: спрашивается один раз и запоминается в браузере.
 function haveKey() {
   if (localStorage.getItem("owner-key")) return true;
-  const k = prompt("Пароль владельца (запомнится на этом устройстве):");
+  const k = prompt("Пароль владельца для советов друзей (запомнится на этом устройстве):");
   if (k) localStorage.setItem("owner-key", k);
   return !!k;
+}
+
+// ---------- данные владельца: приватный репозиторий GitHub ----------
+// Отметки, ❤, перечитывания, квизы, книга дня, замечания — в AlexLion89/bookshelf-owner через GitHub API: с мобильного
+// в РФ он отвечает (замер: 6 из 6 за 0,2 с), а Cloudflare-Worker — нет. Ключ — токен GitHub только к этому
+// репозиторию (Contents: чтение и запись), вводится на каждом устройстве один раз. Каждое изменение — коммит, история
+// репозитория — резервная копия. Сборка сайта читает его копию (scripts/owner_data.py), гостям — data/owner_public.json.
+const GH = "https://api.github.com", GH_REPO = "AlexLion89/bookshelf-owner";
+const GH_FILE = { "/me": "me.json", "/fav": "fav.json", "/reread": "reread.json", "/quiz": "quiz.json", "/dice": "dice.json",
+  "/feedback": "feedback.json", "/feedback/del": "feedback.json" };
+const GH_EMPTY = { "me.json": {}, "fav.json": { on: [], off: [] }, "reread.json": {}, "quiz.json": {}, "dice.json": [], "feedback.json": [] };
+const ghToken = () => localStorage.getItem("gh-token");
+// Ключ, вставленный из заметок или мессенджера, бывает с пробелами, кавычками, переводом строки и BOM.
+const cleanKey = s => String(s ?? "").replace(/[\uFEFF\s"'«»`]/g, "");
+const ghErr = (message, kind) => Object.assign(new Error(message), { kind });   // kind: auth | conflict | net
+async function gh(url, opts = {}) {
+  const token = ghToken();
+  if (!token || !/^[\x21-\x7e]+$/.test(token)) throw ghErr("нет ключа данных", "auth");
+  let r;
+  try {
+    r = await fetch(GH + url, { ...opts, cache: "no-store", signal: AbortSignal.timeout(15000),
+      headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", ...(opts.headers || {}) } });
+  } catch { throw ghErr("нет связи с GitHub", "net"); }
+  if (r.status === 401) throw ghErr("ключ данных не подходит", "auth");
+  if (r.status === 403 && !/rate limit/i.test((await r.clone().json().catch(() => ({}))).message || "")) throw ghErr("у ключа нет доступа к bookshelf-owner", "auth");
+  return r;
+}
+const toB64 = s => { let bin = ""; for (const x of new TextEncoder().encode(s)) bin += String.fromCharCode(x); return btoa(bin); };
+const fromB64 = b => new TextDecoder().decode(Uint8Array.from(atob(b.replace(/\s/g, "")), c => c.charCodeAt(0)));
+// Копия файлов на устройстве {файл: {data, sha, etag, wrote}}: условный запрос (не изменился — 304 без тела) и пауза
+// после своей записи — GitHub пару секунд может отдавать прежнюю версию, и только что поставленная отметка пропала бы.
+const GH_CACHE = "gh-cache";
+const ghCache = () => JSON.parse(localStorage.getItem(GH_CACHE) || "{}");
+function ghKeep(file, x) {
+  const c = ghCache();
+  c[file] = x;
+  try { localStorage.setItem(GH_CACHE, JSON.stringify(c)); } catch { /* переполнен — без копии */ }
+}
+async function ghLoad(file, { force = false } = {}) {
+  const c = ghCache()[file];
+  if (c && !force && Date.now() - (c.wrote || 0) < 15000) return c;
+  const r = await gh(`/repos/${GH_REPO}/contents/${file}?ref=main`, c && c.etag && !force ? { headers: { "If-None-Match": c.etag } } : {});
+  if (r.status === 304 && c) return c;
+  let x;
+  if (r.status === 404) x = { data: JSON.parse(JSON.stringify(GH_EMPTY[file])), sha: null, etag: null };
+  else if (!r.ok) throw ghErr("GitHub ответил " + r.status, "net");
+  else { const d = await r.json(); x = { data: JSON.parse(fromB64(d.content)), sha: d.sha, etag: r.headers.get("ETag") }; }
+  ghKeep(file, x);
+  return x;
+}
+async function ghWrite(file, data, sha, message) {
+  const r = await gh(`/repos/${GH_REPO}/contents/${file}`, { method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, content: toB64(JSON.stringify(data, null, 1) + "\n"), branch: "main", ...(sha ? { sha } : {}) }) });
+  if (r.status === 409 || r.status === 422) throw ghErr("файл изменился", "conflict");
+  if (!r.ok) throw ghErr("GitHub ответил " + r.status, "net");
+  return (await r.json()).content.sha;
+}
+// Правка к файлу — то же, что делал Worker (worker.js): одна запись очереди — одна правка.
+function applyOwner(data, path, b) {
+  data = JSON.parse(JSON.stringify(data));
+  if (path === "/me") {
+    if (!b.v) delete data[b.fantlab];
+    else data[b.fantlab] = { v: b.v, title: String(b.title || "").slice(0, 200), authors: (b.authors || []).slice(0, 5),
+      image: /^https:\/\/fantlab\.ru\//.test(b.image || "") ? b.image : null, from: b.from || null, date: b.date || today(), at: b.at || Date.now(),
+      ...(b.v === "не то" && WHY_NOT[b.why] ? { why: b.why } : {}), ...(b.v === "читал" && b.fin === 1 ? { fin: 1 } : {}) };
+  } else if (path === "/fav") {
+    data.on = data.on.filter(x => x !== b.id); data.off = data.off.filter(x => x !== b.id);
+    (b.on ? data.on : data.off).push(b.id);
+  } else if (path === "/reread") applyReread(data, b.id, b);
+  else if (path === "/quiz") Object.assign(data, b.items);
+  else if (path === "/dice") {
+    const have = new Set(data.map(x => x.at));
+    data = [...data, ...b.items.filter(x => !have.has(x.at))].sort((x, y) => x.at - y.at).slice(-60);
+  } else if (path === "/feedback") {
+    if (!data.some(x => x.id === b.id)) data = [...data, { id: b.id, at: b.at || Date.now(), text: b.text, ctx: b.ctx || "" }].slice(-200);
+  } else if (path === "/feedback/del") data = data.filter(x => x.id !== b.id);
+  return data;
+}
+// Сообщение коммита — по-человечески: история репозитория читается как дневник отметок.
+function ghMessage(items) {
+  const book = id => { const b = state.lib.find(x => x.id === id); return b ? `«${b.title}»` : `книга ${id}`; };
+  const MARK = { "план": "★ в план", "читаю": "📖 читаю", "читал": "✓ читал", "не то": "✕ не то" };
+  const parts = [...new Set(items.map(({ path, body: b }) =>
+    path === "/me" ? (b.v ? `${MARK[b.v]}${b.why ? ` (${WHY_NOT[b.why]})` : ""}${b.fin ? " — дочитал" : ""}: «${b.title}»` : `снята отметка: «${b.title}»`)
+    : path === "/fav" ? `${b.on ? "❤" : "♡ убрано"}: ${book(b.id)}`
+    : path === "/reread" ? `перечитывание ${book(b.id)}: ${b.add ? "+" + b.add : b.del ? "−" + b.del : b.n !== undefined ? "без даты ×" + b.n : b.now ? "перечитываю" : "отложено"}`
+    : path === "/quiz" ? `квизы: ответов ${Object.keys(b.items).length}`
+    : path === "/dice" ? "книга дня"
+    : path === "/feedback" ? `🐞 замечание: ${String(b.text).slice(0, 60)}` : "замечание удалено"))];
+  return parts.slice(0, 3).join("; ") + (parts.length > 3 ? ` и ещё ${parts.length - 3}` : "");
+}
+// Все правки одного файла из очереди — одним коммитом. Файл успели поменять с другого устройства — перечитать и
+// наложить правки заново.
+async function ghFlush(file) {
+  const sending = pending().filter(x => GH_FILE[x.path] === file);
+  let next;
+  for (let tries = 0; ; tries++) {
+    const cur = await ghLoad(file, { force: tries > 0 });
+    next = sending.reduce((d, x) => applyOwner(d, x.path, x.body), cur.data);
+    try {
+      const sha = await ghWrite(file, next, cur.sha, ghMessage(sending));
+      ghKeep(file, { data: next, sha, etag: null, wrote: Date.now() });
+      break;
+    } catch (e) { if (e.kind !== "conflict" || tries >= 3) throw e; }
+  }
+  dropSent(sending);
+}
+// Ключ данных: спрашивается при первой записи (и по кнопке на плашке), запоминается в браузере.
+function haveGh() {
+  if (ghToken()) return true;
+  const k = cleanKey(prompt("Ключ данных — токен GitHub к репозиторию bookshelf-owner (запомнится на этом устройстве):"));
+  if (k) localStorage.setItem("gh-token", k);
+  paintGhBar();
+  if (k) { refreshFromServer(); flush(); }
+  return !!k;
+}
+// Владелец без ключа (устройство до переезда в GitHub) — плашка «нужен ключ данных»: отметки пока видны как у гостя.
+function paintGhBar() {
+  document.getElementById("gh-bar").hidden = !state.owner || !!ghToken();
 }
 
 // ---------- очередь записей ----------
@@ -113,24 +233,28 @@ function enqueue(path, body, key) {
   flush();
 }
 let flushing = false, flushTimer, flushDelay = 3000;
+// Пока запрос шёл, ту же книгу могли нажать снова — тогда в очереди уже новая запись, её не трогаем.
+const dropSent = sent => savePending(pending().filter(y => !sent.some(x => x.key === y.key && JSON.stringify(x.body) === JSON.stringify(y.body))));
 async function flush() {
-  if (flushing || !pending().length || !localStorage.getItem("owner-key")) return;
+  if (flushing || !pending().length) return;
   flushing = true;
   clearTimeout(flushTimer);
   let x;
   try {
-    while ((x = pending()[0])) {
-      await api(x.path, x.body);
-      if (x.path === "/quiz") qzMerge(x.body.items);
-      // Пока запрос шёл, ту же книгу могли нажать снова — тогда в очереди уже новая запись, её не трогаем.
-      savePending(pending().filter(y => !(y.key === x.key && JSON.stringify(y.body) === JSON.stringify(x.body))));
-    }
+    // Данные владельца — в GitHub, файл за файлом. Без ключа — ждут в очереди (плашка просит ключ).
+    if (ghToken()) for (const file of new Set(pending().filter(y => GH_FILE[y.path]).map(y => GH_FILE[y.path]))) await ghFlush(file);
+    // Ответы на советы друзей — в Worker, по одному.
+    if (localStorage.getItem("owner-key")) while ((x = pending().find(y => !GH_FILE[y.path]))) { await api(x.path, x.body); dropSent([x]); }
     flushDelay = 3000;
     refreshFromServer();
   } catch (e) {
-    if (e.status === 401) {
+    if (e.kind === "auth") {
+      localStorage.removeItem("gh-token");
+      paintGhBar();
+      alert("Ключ данных не подошёл (" + e.message + ") — введите его заново на плашке вверху. Несохранённые отметки подождут.");
+    } else if (e.status === 401) {
       localStorage.removeItem("owner-key");
-      alert("Пароль владельца не подошёл — войдите заново (ссылка внизу страницы). Несохранённые отметки подождут.");
+      alert("Пароль для советов друзей не подошёл — он спросится снова. Несохранённые ответы подождут.");
     } else if (e.status === 404) {
       // Адреса нет — значит, Worker в Cloudflare ещё старый (код вставляют вручную): запись ждёт, а не теряется.
       flushTimer = setTimeout(flush, 60000);
@@ -149,11 +273,22 @@ function paintPending() {
   const n = pending().length, b = document.getElementById("pending");
   b.hidden = !n;
   b.textContent = `⏳ сохраняю: ${n}`;
-  b.title = localStorage.getItem("owner-key") ? "Нет связи с сервером — повторяю. Нажмите, чтобы попробовать сейчас." : "Нужен пароль владельца";
+  b.title = ghToken() ? "Нет связи — повторяю. Нажмите, чтобы попробовать сейчас." : "Нужен ключ данных";
 }
-// Свежие отметки и ❤ с сервера; несохранённое из очереди накладывается сверху.
+// Свежие отметки, ❤ и перечитывания: владельцу — из репозитория, гостю (и владельцу без ключа) — то, что выложено
+// с сайтом (обновляется при каждой выкладке). Несохранённое из очереди накладывается сверху.
 async function refreshFromServer() {
-  const [m, fav, rr] = await Promise.all([apiGet("/me").catch(() => null), apiGet("/fav").catch(() => null), apiGet("/reread").catch(() => null)]);
+  let m = null, fav = null, rr = null;
+  if (state.owner && ghToken()) {
+    [m, fav, rr] = await Promise.all(["me.json", "fav.json", "reread.json"].map(f => ghLoad(f).then(x => x.data).catch(e => {
+      if (e.kind === "auth") { localStorage.removeItem("gh-token"); paintGhBar(); }
+      return null;
+    })));
+  } else {
+    const pub = await fetch("data/owner_public.json").then(r => r.ok ? r.json() : null).catch(() => null);
+    if (pub) ({ me: m, fav, reread: rr } = pub);
+  }
+  for (const [k, v] of [["/me", m], ["/fav", fav], ["/reread", rr]]) if (v) cacheApi(k, v);
   state.synced = !!(m && fav);
   if (rr) { setRereads(rr); renderReads(); }   // старый Worker без /reread — 404, перечитываний просто нет
   if (m) { setMarks(m); if (state.me) renderMe(); else renderNowReading(); }
@@ -193,26 +328,32 @@ const el = (tag, attrs = {}, ...kids) => {
   return e;
 };
 
-// Режим владельца: адрес с ?me или вход по паролю (ссылка внизу страницы) — дальше его помнит устройство.
-// Сайт с домашнего экрана iPhone открывается без ?me и хранит данные отдельно от Safari — ему нужен вход.
+// Режим владельца: вход по ключу данных (ссылка внизу страницы) или адрес с ?me — дальше его помнит устройство.
+// Сайт с домашнего экрана iPhone открывается без ?me и хранит данные отдельно от Safari — ему нужен свой вход.
 async function ownerLogin() {
-  const k = prompt("Пароль владельца (запомнится на этом устройстве):");
+  const k = cleanKey(prompt("Ключ данных — токен GitHub к репозиторию bookshelf-owner (запомнится на этом устройстве):"));
   if (!k) return;
-  localStorage.setItem("owner-key", k);
-  let ok = false;
-  // Worker сверяет пароль раньше данных: пустой запрос с верным паролем — 400, с неверным — 401. Ничего не пишется.
-  try { await api("/me", { fantlab: null }); ok = true; } catch (e) {
-    ok = e.status === 400;
-    if (!ok) alert(e.status === 401 ? "Пароль не подошёл." : "Не удалось проверить пароль: " + e.message);
+  localStorage.setItem("gh-token", k);
+  // Ключ проверяется чтением самого репозитория: приватный без доступа GitHub показывает как 404. Ничего не пишется.
+  try {
+    const r = await gh(`/repos/${GH_REPO}`);
+    if (r.status === 404) throw ghErr("ключ не видит репозиторий bookshelf-owner", "auth");
+    if (!r.ok) throw ghErr("GitHub ответил " + r.status, "net");
+    if (!((await r.json()).permissions || {}).push) throw ghErr("у ключа нет права записи (Contents: Read and write)", "auth");
+  } catch (e) {
+    localStorage.removeItem("gh-token");
+    alert(e.kind === "auth" ? "Ключ не подошёл: " + e.message + "." : "Не удалось проверить ключ: " + e.message + ".");
+    return;
   }
-  if (!ok) { localStorage.removeItem("owner-key"); return; }
   localStorage.setItem("owner", "1");
   location.reload();
 }
 function ownerLogout() {
   localStorage.removeItem("owner");
   localStorage.removeItem("owner-key");
-  localStorage.removeItem(API_CACHE);   // в кэше — то, что сервер отдаёт владельцу (скрытые советы), гостю незачем
+  localStorage.removeItem("gh-token");
+  localStorage.removeItem(GH_CACHE);
+  localStorage.removeItem(API_CACHE);   // в кэше — то, что видит владелец (скрытые советы, все отметки), гостю незачем
   location.replace(location.pathname + location.hash);   // без ?me — иначе режим включится снова
 }
 
@@ -251,6 +392,7 @@ async function load() {
   how.open = !owner;
   how.classList.toggle("fold", owner);
   paintNav();
+  paintGhBar();
   if (!state.lib.length) state.lib = (await privP) || (await libP) || [];
   // Отметки, ❤ и перечитывания — сразу из прошлого ответа сервера: свежие догрузит refreshFromServer.
   setMarks(cachedApi("/me") || {});
@@ -604,7 +746,7 @@ function migrateHidden() {
 // extra — why (причина «не то») или fin (дочитал сейчас); keep — не снимать отметку повторным нажатием
 // (так «следующей» в плане ставит тот же «план» заново, со свежим временем).
 function markRec(r, v, extra = {}, keep) {
-  if (!haveKey()) return;
+  if (!haveGh()) return;
   const was = state.marks[r.fantlab], next = was && was.v === v && !keep ? null : v;   // повторное нажатие снимает отметку
   const body = { fantlab: r.fantlab, v: next, title: r.title, authors: r.authors, image: r.image || null, from: (r.friends || [])[0]?.from,
     ...(next ? extra : {}), at: Date.now() };
@@ -736,7 +878,7 @@ function fillCovers() {
       const cur = state.marks[id];
       if (!img || !cur || cur.v !== m.v) return;
       cur.image = "https://fantlab.ru" + img;
-      if (state.owner && localStorage.getItem("owner-key"))
+      if (state.owner && ghToken())
         enqueue("/me", { fantlab: +id, v: cur.v, title: cur.title, authors: cur.authors || [], image: cur.image, from: cur.from || null }, "me:" + id);
       if (state.me) renderMe(); else renderNowReading();
     }).catch(() => coverAsked.delete(id));
@@ -1159,14 +1301,14 @@ function diceRoll(auto) {
   if (c.some(x => !recent.has(x.s + x.id))) c = c.filter(x => !recent.has(x.s + x.id));
   const x = { ...c[Math.floor(Math.random() * c.length)], at: Date.now(), d: dayKey(), ...(auto ? { a: 1 } : {}) };
   saveDiceLog([...log, x]);
-  if (state.owner && localStorage.getItem("owner-key")) enqueue("/dice", { items: [x] }, "dice:" + x.at);
+  if (state.owner && ghToken()) enqueue("/dice", { items: [x] }, "dice:" + x.at);
   return x;
 }
-// Владелец: журнал сервера сливается с журналом устройства, а то, чего на сервере нет (бросали без связи
-// или до того, как Worker научился /dice), уходит туда. Старый Worker отвечает 404 — тогда журнал на устройстве.
+// Владелец: журнал из репозитория сливается с журналом устройства, а то, чего там нет (бросали без связи
+// или до переезда в GitHub), уходит туда.
 async function diceSync() {
-  if (!state.owner || !localStorage.getItem("owner-key")) return;
-  const srv = await api("/dice").catch(() => null);
+  if (!state.owner || !ghToken()) return;
+  const srv = await ghLoad("dice.json").then(x => x.data).catch(() => null);
   if (!Array.isArray(srv)) return;
   const have = new Set(srv.map(x => x.at)), mine = diceLog().filter(x => !have.has(x.at));
   saveDiceLog([...srv, ...mine]);
@@ -1289,6 +1431,9 @@ function sgOwner(path, body) {
   // Книга и друг — только для показа до ответа сервера; Worker берёт их из самого предложения.
   if (path === "/suggest/status" && x.fantlab) body = { ...body, fantlab: x.fantlab, title: x.title, author: x.author, from: x.from };
   enqueue(path, body, path + ":" + body.id);
+  // Отметка владельца живёт в репозитории — туда же: «взял в план» по совету друга видно в «Мне почитать» везде.
+  if (path === "/suggest/status" && x.fantlab && ghToken())
+    enqueue("/me", { fantlab: x.fantlab, v: body.v, title: x.title, authors: x.author ? [x.author] : [], from: x.from, at: Date.now() }, "me:" + x.fantlab);
   setMarks(state.marks);   // сразу наложить отметку на «Мне почитать»
   renderSuggest();
   if (state.me) renderMe();
@@ -1344,15 +1489,13 @@ const qzLocal = () => Object.fromEntries(Object.entries(JSON.parse(localStorage.
   .map(([k, v]) => [k, typeof v === "number" ? { ok: v, d: today(), b: v ? null : 0 } : v]));
 function qzLog() {
   if (!state.owner) return qzLocal();
-  const log = { ...qzLocal(), ...(state.qzServer || JSON.parse(localStorage.getItem("quiz-cache") || "{}")) };
+  const log = { ...qzLocal(), ...qzServer() };
   for (const x of pending()) if (x.path === "/quiz") Object.assign(log, x.body.items);
   return log;
 }
 const qzDue = r => r && r.b != null && r.b < QZ_IV.length ? addDays(r.d, QZ_IV[r.b]) : null;
-function qzMerge(items) {
-  state.qzServer = { ...(state.qzServer || JSON.parse(localStorage.getItem("quiz-cache") || "{}")), ...items };
-  localStorage.setItem("quiz-cache", JSON.stringify(state.qzServer));
-}
+// Ответы владельца из репозитория (копия на устройстве; quiz-cache — до переезда в GitHub).
+const qzServer = () => (ghCache()["quiz.json"] || {}).data || JSON.parse(localStorage.getItem("quiz-cache") || "{}");
 function qzSave(key, rec) {
   if (!state.owner) {
     const l = JSON.parse(localStorage.getItem("quiz-log") || "{}");
@@ -1363,12 +1506,12 @@ function qzSave(key, rec) {
   const old = pending().find(x => x.key === "quiz");
   enqueue("/quiz", { items: { ...(old ? old.body.items : {}), [key]: rec } }, "quiz");
 }
-// Ответы владельца с сервера; ответы, данные в этом браузере раньше, — туда же, один раз.
+// Ответы владельца из репозитория; ответы, данные в этом браузере раньше, — туда же, один раз.
 async function qzSync() {
-  if (!state.owner || !localStorage.getItem("owner-key")) return;
-  try { state.qzServer = await api("/quiz"); } catch { return; }
-  localStorage.setItem("quiz-cache", JSON.stringify(state.qzServer));
-  const local = qzLocal(), fresh = Object.fromEntries(Object.entries(local).filter(([k]) => !state.qzServer[k]));
+  if (!state.owner || !ghToken()) return;
+  let srv;
+  try { srv = (await ghLoad("quiz.json")).data; } catch { return; }
+  const local = qzLocal(), fresh = Object.fromEntries(Object.entries(local).filter(([k]) => !srv[k]));
   if (Object.keys(fresh).length) {
     const old = pending().find(x => x.key === "quiz");
     enqueue("/quiz", { items: { ...fresh, ...(old ? old.body.items : {}) } }, "quiz");
@@ -2094,7 +2237,7 @@ function setRereads(server) {
   for (const x of pending()) if (x.path === "/reread") applyReread(state.rereads, x.body.id, x.body);
 }
 function reread(b, op, msg) {
-  if (!haveKey()) return;
+  if (!haveGh()) return;
   if ((op.add && !/^\d{4}-(0[1-9]|1[0-2])$/.test(op.add)) || (op.add && op.add > thisMonth())) { toast("Выберите месяц не позже текущего"); return; }
   applyReread(state.rereads, b.id, op);
   enqueue("/reread", { id: b.id, ...op }, `rr:${b.id}:${op.add || op.del || (op.n !== undefined ? "n" : "now")}`);
@@ -2140,7 +2283,7 @@ function rereadEl(b) {
 }
 
 function toggleFav(b) {
-  if (!haveKey()) return;
+  if (!haveGh()) return;
   b.fav = !b.fav;
   enqueue("/fav", { id: b.id, on: b.fav }, "fav:" + b.id);
   renderFav(); renderPick(); renderAll("keep"); openCard(b);
@@ -2293,7 +2436,7 @@ function feedbackCtx() {
     (navigator.userAgent.match(/iPhone OS [\d_]+|iPad|Android [\d.]+|Windows NT [\d.]+|Mac OS X [\d_]+/) || [""])[0]].filter(Boolean).join(" · ");
 }
 function sendFeedback(text) {
-  if (!haveKey()) return false;
+  if (!haveGh()) return false;
   const id = "fb-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   enqueue("/feedback", { id, text, ctx: feedbackCtx(), at: Date.now() }, "fb:" + id);
   toast("Замечание записано — разберу при следующем обновлении");
@@ -2309,7 +2452,7 @@ async function openFeedback() {
     text, el("button", { class: "more fb-send", onclick: () => { if (text.value.trim() && sendFeedback(text.value.trim())) dlg.close(); } }, "Отправить"),
     list));
   if (!dlg.open) dlg.showModal();
-  const [sent, replies] = await Promise.all([api("/feedback").catch(() => []),
+  const [sent, replies] = await Promise.all([ghLoad("feedback.json", { force: true }).then(x => x.data).catch(() => (ghCache()["feedback.json"] || {}).data || []),
     fetch("data/feedback.json").then(r => r.ok ? r.json() : {}).catch(() => ({}))]);
   // Ещё не ушедшие — из очереди, удалённые — убрать сразу, не дожидаясь сервера.
   const queued = pending().filter(x => x.path === "/feedback").map(x => ({ ...x.body, queued: true }));
@@ -2329,7 +2472,7 @@ async function openFeedback() {
 // Сайт открывается из кэша своей версии (sw.js). Выкладка поднимает номер версии здесь и в sw.js; новая версия
 // ставится фоном и ждёт — плашка «Обновить» включает её (сообщение skip-waiting → смена Service Worker'а →
 // перезагрузка). Без Service Worker'а (тесты, старые браузеры) кнопка просто перезагружает страницу.
-const siteVer = "bookshelf-v53";
+const siteVer = "bookshelf-v54";
 let swReg = null, updating = false;
 const showUpdate = () => { document.getElementById("update-bar").hidden = false; };
 function applyUpdate() {
@@ -2345,6 +2488,7 @@ async function checkVersion() {
   } catch { /* нет связи — проверим в следующий раз */ }
 }
 document.getElementById("update-btn").addEventListener("click", applyUpdate);
+document.getElementById("gh-btn").addEventListener("click", () => haveGh());
 setInterval(checkVersion, 20 * 60e3);
 // Регистрация — после первой загрузки (вызывает load): установка скачивает оболочку и данные, и раньше времени
 // она отнимала бы канал у самой страницы.
@@ -2388,7 +2532,7 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("online", () => { flushDelay = 3000; flush(); });
 document.getElementById("pending").addEventListener("click", () => {
-  if (!localStorage.getItem("owner-key") && !haveKey()) return;
+  if (!ghToken() && !haveGh()) return;
   flushDelay = 3000; flush();
 });
 load();
