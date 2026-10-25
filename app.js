@@ -109,11 +109,14 @@ function haveKey() {
 const GH = "https://api.github.com", GH_REPO = "AlexLion89/bookshelf-owner";
 const GH_FILE = { "/me": "me.json", "/fav": "fav.json", "/reread": "reread.json", "/quiz": "quiz.json", "/dice": "dice.json",
   "/feedback": "feedback.json", "/feedback/del": "feedback.json" };
-const GH_EMPTY = { "me.json": {}, "fav.json": { on: [], off: [] }, "reread.json": {}, "quiz.json": {}, "dice.json": [], "feedback.json": [] };
+const GH_EMPTY = { "me.json": {}, "fav.json": { on: [], off: [] }, "reread.json": {}, "quiz.json": {}, "dice.json": [], "feedback.json": [],
+  "private_books.json": [] };
 const ghToken = () => localStorage.getItem("gh-token");
 // Ключ, вставленный из заметок или мессенджера, бывает с пробелами, кавычками, переводом строки и BOM.
 const cleanKey = s => String(s ?? "").replace(/[\uFEFF\s"'«»`]/g, "");
-const ghErr = (message, kind) => Object.assign(new Error(message), { kind });   // kind: auth | conflict | net
+// kind: auth — ключ не годится; conflict — файл поменяли с другого устройства; net — пройдёт само (сеть, сбой GitHub);
+// bad — повтором не исправить (GitHub не принял запись): очередь не долбит, а показывает причину.
+const ghErr = (message, kind) => Object.assign(new Error(message), { kind });
 async function gh(url, opts = {}) {
   const token = ghToken();
   if (!token || !/^[\x21-\x7e]+$/.test(token)) throw ghErr("нет ключа данных", "auth");
@@ -121,10 +124,25 @@ async function gh(url, opts = {}) {
   try {
     r = await fetch(GH + url, { ...opts, cache: "no-store", signal: AbortSignal.timeout(15000),
       headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", ...(opts.headers || {}) } });
-  } catch { throw ghErr("нет связи с GitHub", "net"); }
+  } catch (e) { throw ghErr(e.name === "TimeoutError" ? "GitHub не ответил за 15 с" : `нет связи с GitHub (${e.message})`, "net"); }
   if (r.status === 401) throw ghErr("ключ данных не подходит", "auth");
   if (r.status === 403 && !/rate limit/i.test((await r.clone().json().catch(() => ({}))).message || "")) throw ghErr("у ключа нет доступа к bookshelf-owner", "auth");
   return r;
+}
+// Ошибка в ответе GitHub: 5xx и лимит запросов проходят сами, остальное — нет.
+async function ghFail(r, what) {
+  const msg = (await r.json().catch(() => ({}))).message || "";
+  return ghErr(`GitHub ответил ${r.status} на ${what}${msg ? ": " + msg : ""}`, r.status >= 500 || r.status === 429 || r.status === 403 ? "net" : "bad");
+}
+// Приватный репозиторий, которого ключ не видит, GitHub показывает как 404 — так же, как ещё не созданный файл.
+// Без этой проверки такой ключ читал «пустые» файлы, а запись повторялась вечно.
+let ghRepoOk = false;
+async function ghRepoVisible() {
+  if (ghRepoOk) return;
+  const r = await gh(`/repos/${GH_REPO}`);
+  if (r.status === 404) throw ghErr("ключ не видит репозиторий bookshelf-owner", "auth");
+  if (!r.ok) throw await ghFail(r, "проверку ключа");
+  ghRepoOk = true;
 }
 const toB64 = s => { let bin = ""; for (const x of new TextEncoder().encode(s)) bin += String.fromCharCode(x); return btoa(bin); };
 const fromB64 = b => new TextDecoder().decode(Uint8Array.from(atob(b.replace(/\s/g, "")), c => c.charCodeAt(0)));
@@ -143,8 +161,8 @@ async function ghLoad(file, { force = false } = {}) {
   const r = await gh(`/repos/${GH_REPO}/contents/${file}?ref=main`, c && c.etag && !force ? { headers: { "If-None-Match": c.etag } } : {});
   if (r.status === 304 && c) return c;
   let x;
-  if (r.status === 404) x = { data: JSON.parse(JSON.stringify(GH_EMPTY[file])), sha: null, etag: null };
-  else if (!r.ok) throw ghErr("GitHub ответил " + r.status, "net");
+  if (r.status === 404) { await ghRepoVisible(); x = { data: JSON.parse(JSON.stringify(GH_EMPTY[file] ?? null)), sha: null, etag: null }; }
+  else if (!r.ok) throw await ghFail(r, "чтение " + file);
   else { const d = await r.json(); x = { data: JSON.parse(fromB64(d.content)), sha: d.sha, etag: r.headers.get("ETag") }; }
   ghKeep(file, x);
   return x;
@@ -152,8 +170,14 @@ async function ghLoad(file, { force = false } = {}) {
 async function ghWrite(file, data, sha, message) {
   const r = await gh(`/repos/${GH_REPO}/contents/${file}`, { method: "PUT", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, content: toB64(JSON.stringify(data, null, 1) + "\n"), branch: "main", ...(sha ? { sha } : {}) }) });
-  if (r.status === 409 || r.status === 422) throw ghErr("файл изменился", "conflict");
-  if (!r.ok) throw ghErr("GitHub ответил " + r.status, "net");
+  if (r.status === 409) throw ghErr("файл изменился", "conflict");
+  if (r.status === 404) throw ghErr("ключ не видит репозиторий bookshelf-owner", "auth");
+  if (!r.ok) {
+    const e = await ghFail(r, "запись " + file);
+    // 422 про sha («wasn't supplied», «does not match») — тот же конфликт: файл появился или поменялся с другого устройства.
+    if (r.status === 422 && /sha/i.test(e.message)) e.kind = "conflict";
+    throw e;
+  }
   return (await r.json()).content.sha;
 }
 // Правка к файлу — то же, что делал Worker (worker.js): одна запись очереди — одна правка.
@@ -235,12 +259,20 @@ function enqueue(path, body, key) {
   flush();
 }
 let flushing = false, flushTimer, flushDelay = 3000;
+// Почему очередь стоит — последняя неудача {text, at, stuck}; stuck — сама не пройдёт, повтор только по кнопке.
+const PENDING_ERR = "pending-err";
+const flushErr = () => JSON.parse(localStorage.getItem(PENDING_ERR) || "null");
+function setFlushErr(text, stuck) {
+  if (text) localStorage.setItem(PENDING_ERR, JSON.stringify({ text, at: Date.now(), stuck: !!stuck }));
+  else localStorage.removeItem(PENDING_ERR);
+}
 // Пока запрос шёл, ту же книгу могли нажать снова — тогда в очереди уже новая запись, её не трогаем.
 const dropSent = sent => savePending(pending().filter(y => !sent.some(x => x.key === y.key && JSON.stringify(x.body) === JSON.stringify(y.body))));
 async function flush() {
   if (flushing || !pending().length) return;
   flushing = true;
   clearTimeout(flushTimer);
+  paintPending();
   let x;
   try {
     // Данные владельца — в GitHub, файл за файлом. Без ключа — ждут в очереди (плашка просит ключ).
@@ -248,23 +280,33 @@ async function flush() {
     // Ответы на советы друзей — в Worker, по одному.
     if (localStorage.getItem("owner-key")) while ((x = pending().find(y => !GH_FILE[y.path]))) { await api(x.path, x.body); dropSent([x]); }
     flushDelay = 3000;
+    setFlushErr(null);
     refreshFromServer();
   } catch (e) {
+    console.warn("Очередь записей:", e);
     if (e.kind === "auth") {
       localStorage.removeItem("gh-token");
+      ghRepoOk = false;
       paintGhBar();
+      setFlushErr("ключ данных не подошёл: " + e.message, true);
       alert("Ключ данных не подошёл (" + e.message + ") — введите его заново на плашке вверху. Несохранённые отметки подождут.");
     } else if (e.status === 401) {
       localStorage.removeItem("owner-key");
+      setFlushErr("пароль для советов друзей не подошёл", true);
       alert("Пароль для советов друзей не подошёл — он спросится снова. Несохранённые ответы подождут.");
     } else if (e.status === 404) {
       // Адреса нет — значит, Worker в Cloudflare ещё старый (код вставляют вручную): запись ждёт, а не теряется.
+      setFlushErr(`Worker в Cloudflare не знает ${x.path} — повторю через минуту`);
       flushTimer = setTimeout(flush, 60000);
     } else if (e.status >= 400 && e.status < 500) {
       savePending(pending().filter(y => y !== x && y.key !== x.key));   // сервер такое не примет никогда — не держать
-    } else {
+    } else if (e.kind === "net" || e.kind === "conflict" || e.network || e.status >= 500) {
+      setFlushErr(`${e.kind === "conflict" ? "файл всё время меняется с другого устройства" : e.message} — повторю через ${Math.round(flushDelay / 1000)} с`);
       flushTimer = setTimeout(flush, flushDelay);
       flushDelay = Math.min(flushDelay * 2, 120000);
+    } else {
+      // GitHub не принял запись или сбой в самом сайте: повтор не поможет — ждать владельца (окно «⏳»).
+      setFlushErr(e.kind === "bad" ? e.message : "сбой на сайте: " + e.message, true);
     }
   } finally {
     flushing = false;
@@ -272,10 +314,38 @@ async function flush() {
   }
 }
 function paintPending() {
-  const n = pending().length, b = document.getElementById("pending");
+  const n = pending().length, b = document.getElementById("pending"), err = flushErr();
   b.hidden = !n;
-  b.textContent = `⏳ сохраняю: ${n}`;
-  b.title = ghToken() ? "Нет связи — повторяю. Нажмите, чтобы попробовать сейчас." : "Нужен ключ данных";
+  b.textContent = `${err && err.stuck && !flushing ? "⚠️ не сохранено" : "⏳ сохраняю"}: ${n}`;
+  b.title = "Что ждёт сохранения и почему — нажмите";
+  if (document.getElementById("pend").open) paintPendingDlg();
+}
+// Окно по нажатию на «⏳»: что ждёт, почему и что с этим сделать. Раньше очередь, которой мешала не сеть, а, скажем,
+// ключ, висела молча — и не было видно ни причины, ни того, что именно не сохранилось.
+function pendingLabel(x) {
+  if (GH_FILE[x.path]) return ghMessage([x]);
+  return x.path === "/suggest/status" ? `совет друга${x.body.title ? ` «${x.body.title}»` : ""}: ${x.body.v || "отметка снята"}`
+    : `совет друга: ${x.body.hidden ? "скрыть" : "вернуть"}`;
+}
+function paintPendingDlg() {
+  const dlg = document.getElementById("pend"), q = pending(), err = flushErr();
+  const needGh = q.some(x => GH_FILE[x.path]) && !ghToken(), needPass = q.some(x => !GH_FILE[x.path]) && !localStorage.getItem("owner-key");
+  const at = t => new Date(t).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  const retry = () => { flushDelay = 3000; flush(); };
+  dlg.replaceChildren(el("div", { class: "cardbody" }, el("button", { class: "close", onclick: () => dlg.close() }, "×"),
+    el("h2", {}, q.length ? `⏳ Ждут сохранения: ${q.length}` : "✓ Всё сохранено"),
+    needGh ? el("p", { class: "pend-why" }, "На этом устройстве нет ключа данных — отметки ждут его. ",
+      el("button", { class: "chip", onclick: () => haveGh() }, "Ввести ключ")) : null,
+    needPass ? el("p", { class: "pend-why" }, "Ответы на советы друзей ждут пароль владельца. ",
+      el("button", { class: "chip", onclick: () => haveKey() && retry() }, "Ввести пароль")) : null,
+    err && q.length ? el("p", { class: "pend-why" }, `Последняя попытка в ${at(err.at)}: ${err.text}`) : null,
+    el("div", { class: "pend-list" }, ...q.map(x => el("div", { class: "pend-item" }, el("span", {}, pendingLabel(x)),
+      el("button", { class: "link", onclick: () => {
+        if (!confirm(`Не сохранять «${pendingLabel(x)}»? На экране вернётся то, что сохранено.`)) return;
+        savePending(pending().filter(y => y.key !== x.key));
+        refreshFromServer();
+      } }, "не сохранять")))),
+    q.length ? el("button", { class: "more", disabled: flushing ? "" : null, onclick: retry }, flushing ? "Сохраняю…" : "Повторить сейчас") : null));
 }
 // Свежие отметки, ❤ и перечитывания: владельцу — из репозитория, гостю (и владельцу без ключа) — то, что выложено
 // с сайтом (обновляется при каждой выкладке). Несохранённое из очереди накладывается сверху.
@@ -2337,7 +2407,8 @@ function readsEl(b) {
   // Месяц сохраняется, когда поле отпускают («Готово» на iPhone, клик мимо на компьютере), а не на каждый поворот
   // барабана: iPhone присылает change при каждой прокрутке, и перерисовка карточки закрывала выбор после первого же
   // движения (замечание 25.10.2026). Сохранение — следующим тиком: клик по «×» карточки успевает сработать.
-  const month = (value, save, label) => {
+  // clear — что делать, если поле очистили («Сбросить» в барабане iPhone, «Очистить» в календаре на компьютере).
+  const month = (value, save, label, clear) => {
     // Firefox и Safari на компьютере поля «месяц» не знают (выходит строка без календаря) — два списка: месяц и год.
     if (!monthInputOk()) {
       const [y0, m0] = (value || "").split("-"), y1 = new Date().getFullYear(), yFirst = Math.min(+((b.read || "").slice(0, 4)) || y1, y1);
@@ -2345,14 +2416,21 @@ function readsEl(b) {
         ...MONTHS.map((n, i) => el("option", { value: String(i + 1).padStart(2, "0"), selected: m0 === String(i + 1).padStart(2, "0") ? "" : null }, n)));
       const ys = el("select", { class: "rr-sel", "aria-label": label + ": год" }, el("option", { value: "" }, "год"),
         ...Array.from({ length: y1 - yFirst + 1 }, (_, i) => String(y1 - i)).map(y => el("option", { value: y, selected: y === y0 ? "" : null }, y)));
-      const commit = () => { const v = ms.value && ys.value ? `${ys.value}-${ms.value}` : ""; if (v && v !== (value || "")) save(v); };
+      const commit = () => {
+        const v = ms.value && ys.value ? `${ys.value}-${ms.value}` : "";
+        if (v && v !== (value || "")) save(v); else if (!ms.value && !ys.value && value && clear) clear();
+      };
       ms.addEventListener("change", commit); ys.addEventListener("change", commit);
       return el("span", { class: "rr-pick" }, ms, ys);
     }
-    const inp = el("input", { type: "month", class: "rr-month", value: value || "", max: thisMonth(), "aria-label": label });
+    const inp = el("input", { type: "month", class: "rr-month", max: thisMonth(), "aria-label": label });
+    // Значение — свойством, не атрибутом: «Сбросить» на iPhone возвращает поле к атрибуту, и дата бы не убиралась.
+    inp.value = value || "";
     // В Chrome и Edge календарь открывается только по значку справа — открыть по клику в любое место поля.
     if (!matchMedia("(pointer: coarse)").matches) inp.addEventListener("click", () => { try { inp.showPicker(); } catch { /* старый браузер */ } });
-    inp.addEventListener("blur", () => setTimeout(() => { if (inp.value && inp.value !== (value || "")) save(inp.value); }, 0));
+    inp.addEventListener("blur", () => setTimeout(() => {
+      if (inp.value && inp.value !== (value || "")) save(inp.value); else if (!inp.value && value && clear) clear();
+    }, 0));
     inp.addEventListener("keydown", e => { if (e.key === "Enter") inp.blur(); });
     return inp;
   };
@@ -2363,7 +2441,8 @@ function readsEl(b) {
       el("b", { class: "rr-n" }, again ? "×" + again : "нет"),
       chip("+", "", () => again < 99 && setReread(b, { ...x, n: x.n + 1 }, `Перечитывал: ×${again + 1}`))),
     again ? row("Последний раз:",
-      month(last, v => setReread(b, last ? { ...x, d: [...others, v] } : { ...x, d: [v], n: x.n - 1 }, "Последний раз — " + monthName(v)), "Когда перечитали последний раз"),
+      month(last, v => setReread(b, last ? { ...x, d: [...others, v] } : { ...x, d: [v], n: x.n - 1 }, "Последний раз — " + monthName(v)), "Когда перечитали последний раз",
+        () => setReread(b, { ...x, d: others, n: x.n + 1 }, "Дата убрана — перечитывание осталось без даты")),
       last ? el("button", { class: "rr-del", type: "button", onclick: () => setReread(b, { ...x, d: others, n: x.n + 1 }, "Дата убрана — перечитывание осталось без даты") }, "✕ без даты")
         : el("span", { class: "meta" }, "не обязательно")) : null,
     // Промежуточные даты — только если хочется: «вспомнить» дату ещё одного перечитывания из тех, что без даты.
@@ -2579,7 +2658,7 @@ async function openFeedback() {
 // Сайт открывается из кэша своей версии (sw.js). Выкладка поднимает номер версии здесь и в sw.js; новая версия
 // ставится фоном и ждёт — плашка «Обновить» включает её (сообщение skip-waiting → смена Service Worker'а →
 // перезагрузка). Без Service Worker'а (тесты, старые браузеры) кнопка просто перезагружает страницу.
-const siteVer = "bookshelf-v58";
+const siteVer = "bookshelf-v59";
 let swReg = null, updating = false;
 const showUpdate = () => { document.getElementById("update-bar").hidden = false; };
 function applyUpdate() {
@@ -2639,7 +2718,8 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("online", () => { flushDelay = 3000; flush(); });
 document.getElementById("pending").addEventListener("click", () => {
-  if (!ghToken() && !haveGh()) return;
   flushDelay = 3000; flush();
+  paintPendingDlg();
+  document.getElementById("pend").showModal();
 });
 load();
