@@ -9,6 +9,9 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="stylesheet" href="style.css">
+<!-- Соединение с FantLab (поиск, обложки) — заранее: на телефоне каждое новое TLS-соединение заметно. -->
+<link rel="preconnect" href="https://api.fantlab.ru" crossorigin>
+<link rel="preconnect" href="https://fantlab.ru">
 <script>
   // Выбранная тема — до отрисовки, чтобы страница не мигала светлой.
   try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}

@@ -219,22 +219,21 @@ function ownerLogout() {
 async function load() {
   if (new URLSearchParams(location.search).has("me")) localStorage.setItem("owner", "1");
   const owner = localStorage.getItem("owner") === "1";
-  let url = "data/library.json";
-  if (owner) {
-    document.getElementById("owner-badge").hidden = false;
-    // Полная база есть только локально; на сайте — публичная.
-    const r = await fetch("data/library.private.json").catch(() => null);
-    if (r && r.ok) state.lib = await r.json();
-  }
+  // Все данные — сразу и параллельно: раньше база ждала me.json, а тот — library.private.json (на сайте его нет,
+  // 404), и в мобильной сети каждый шаг этой цепочки стоил времени.
+  const json = u => fetch(u).then(r => r.ok ? r.json() : null).catch(() => null);
+  const libP = json("data/library.json"), meP = json("data/me.json"), themesP = json("data/themes.json");
+  // Полная база есть только локально; на сайте — публичная.
+  const privP = owner ? json("data/library.private.json") : Promise.resolve(null);
+  if (owner) document.getElementById("owner-badge").hidden = false;
   state.owner = owner;
   document.getElementById("owner-link").replaceChildren(
     owner ? el("a", { href: "#", class: "fb-link", onclick: e => { e.preventDefault(); openFeedback(); } }, "🐞 Сообщить о проблеме") : "",
     owner ? " · " : "",
     el("a", { href: "#", onclick: e => { e.preventDefault(); owner ? ownerLogout() : ownerLogin(); } }, owner ? "Выйти из режима владельца" : "Я хозяин полки"));
   setMarks({});
-  const m = await fetch("data/me.json").catch(() => null);
-  if (m && m.ok) {
-    state.me = await m.json();
+  state.me = await meP;
+  if (state.me) {
     const btn = document.getElementById("me-btn");
     btn.hidden = false;
     document.getElementById("picks-btn").hidden = false;
@@ -252,7 +251,7 @@ async function load() {
   how.open = !owner;
   how.classList.toggle("fold", owner);
   paintNav();
-  if (!state.lib.length) state.lib = await (await fetch(url)).json();
+  if (!state.lib.length) state.lib = (await privP) || (await libP) || [];
   // Отметки, ❤ и перечитывания — сразу из прошлого ответа сервера: свежие догрузит refreshFromServer.
   setMarks(cachedApi("/me") || {});
   if (cachedApi("/fav")) applyFav(cachedApi("/fav"));
@@ -268,8 +267,7 @@ async function load() {
     return [...c.entries()].sort((a, b) => b[1] - a[1]).map(x => x[0]);
   };
   state.vocab = { genres: count("genres"), places: count("places"), regions: count("regions"), eras: count("eras"), themes: count("themes") };
-  const t = await fetch("data/themes.json").catch(() => null);
-  state.themeGroups = t && t.ok ? await t.json() : {};
+  state.themeGroups = (await themesP) || {};
   buildFilters();
   renderPick();
   renderAll();
@@ -281,6 +279,7 @@ async function load() {
   paintPending();
   refreshFromServer();
   flush();
+  setupServiceWorker();
 }
 
 // ---------- фильтры ----------
@@ -2284,7 +2283,6 @@ document.getElementById("like-search").addEventListener("keydown", e => {
 document.getElementById("card").addEventListener("click", e => { if (e.target.id === "card") e.target.close(); });
 document.getElementById("card").addEventListener("close", () => { state.cardId = null; saveHash(); });
 
-if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js");
 // ---------- замечания ----------
 // «Багулина в дороге»: владелец пишет замечание прямо с сайта, контекст (вкладка, версия, экран) прикладывается сам.
 // Уходит через очередь записей — переживёт плохую связь. Читает разработчик (GET /feedback без пароля);
@@ -2328,27 +2326,61 @@ async function openFeedback() {
 }
 
 // ---------- новая версия ----------
-// Каждая выкладка поднимает номер в sw.js. Изменился, пока страница открыта, — плашка «Обновить»: приложение
-// с экрана «Домой» iOS держит в памяти днями, и раньше свежее было видно только после перезапуска.
-let siteVer = "";
+// Сайт открывается из кэша своей версии (sw.js). Выкладка поднимает номер версии здесь и в sw.js; новая версия
+// ставится фоном и ждёт — плашка «Обновить» включает её (сообщение skip-waiting → смена Service Worker'а →
+// перезагрузка). Без Service Worker'а (тесты, старые браузеры) кнопка просто перезагружает страницу.
+const siteVer = "bookshelf-v52";
+let swReg = null, updating = false;
+const showUpdate = () => { document.getElementById("update-bar").hidden = false; };
+function applyUpdate() {
+  if (swReg && swReg.waiting) { updating = true; swReg.waiting.postMessage("skip-waiting"); }
+  else location.reload();
+}
+// Номер версии на сервере другой — пусть Service Worker скачает новую (плашка появится, когда она встанет).
 async function checkVersion() {
   try {
     const v = ((await (await fetch("sw.js", { cache: "no-store" })).text()).match(/bookshelf-v\d+/) || [])[0];
-    if (!v) return;
-    if (!siteVer) siteVer = v;
-    else if (v !== siteVer) document.getElementById("update-bar").hidden = false;
+    if (!v || v === siteVer) return;
+    if (swReg) swReg.update().catch(() => {}); else showUpdate();
   } catch { /* нет связи — проверим в следующий раз */ }
 }
-document.getElementById("update-btn").addEventListener("click", () => location.reload());
-checkVersion();
+document.getElementById("update-btn").addEventListener("click", applyUpdate);
 setInterval(checkVersion, 20 * 60e3);
+// Регистрация — после первой загрузки (вызывает load): установка скачивает оболочку и данные, и раньше времени
+// она отнимала бы канал у самой страницы.
+function setupServiceWorker() {
+  if ("serviceWorker" in navigator && location.protocol !== "file:") {
+    const sw = navigator.serviceWorker;
+    sw.register("sw.js").then(reg => {
+      swReg = reg;
+      const waiting = () => { if (reg.waiting && sw.controller) showUpdate(); };
+      waiting();
+      reg.addEventListener("updatefound", () => {
+        const w = reg.installing;
+        if (w) w.addEventListener("statechange", () => { if (w.state === "installed") waiting(); });
+      });
+      checkVersion();
+    }).catch(() => {});
+    // Новая версия включилась по кнопке — перезагрузить страницу на ней. Сама (первая установка, переход со старой
+    // схемы «из сети») — не трогать: перезагрузка посреди работы хуже, со следующего открытия всё и так новое.
+    sw.addEventListener("controllerchange", () => { if (updating) { updating = false; location.reload(); } });
+    // Подборки обновляются по понедельникам без новой версии: Service Worker освежил файл — перерисовать тихо.
+    sw.addEventListener("message", e => {
+      if (e.data && e.data.type === "data-updated" && /picks\.json$/.test(e.data.url) && state.picks) {
+        state.picks = null;
+        if (document.getElementById("tab-picks").classList.contains("active")) openPicks();
+      }
+    });
+  } else checkVersion();
+}
 
 // Приложение на телефоне (PWA) iOS держит в памяти днями, и свежая версия видна только после перезапуска.
 // Вернулись спустя полдня — страница перечитывается с сервера; вид сохраняется в адресе.
 const loadedAt = Date.now();
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible") return;
-  if (Date.now() - loadedAt > 6 * 3600e3) { location.reload(); return; }
+  if (Date.now() - loadedAt > 6 * 3600e3) { applyUpdate(); return; }
+  if (swReg) swReg.update().catch(() => {});
   checkVersion();
   flushDelay = 3000; flush();
   if (!state.synced && state.hashReady) refreshFromServer();   // при открытии сервер не ответил — догрузить
