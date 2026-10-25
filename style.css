@@ -254,6 +254,16 @@ footer { text-align: center; color: var(--muted); font-size: 12px; padding: 20px
 .fb-item .link { padding: 2px 0; font-size: 13px; color: var(--muted); }
 /* нет ключа данных — ниже плашки «новая версия», чтобы не перекрывали друг друга */
 .update-bar.gh-bar { top: calc(max(8px, env(safe-area-inset-top)) + 46px); }
+/* перечитывания в карточке книги */
+.rr-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 8px; font-size: 14px; }
+.rr-l { min-width: 7.5em; color: var(--muted); }
+.rr-row .chip { padding: 0 11px; } .rr-date { display: inline-flex; align-items: center; gap: 2px; }
+/* подсказка с «Отменить» */
+.toast { display: flex; align-items: center; gap: 12px; }
+.toast-act { border: 0; background: none; color: var(--accent-soft); font: inherit; font-weight: 600; cursor: pointer; padding: 0; text-decoration: underline; }
+/* ⓘ — что скрыто от гостей */
+.info-btn { border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; padding: 0 2px; }
+.hidden-why { display: block; margin-top: 4px; color: var(--muted); } .hidden-why[hidden] { display: none; }
 /* вышла новая версия сайта */
 .update-bar { position: fixed; z-index: 25; top: max(8px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px;
   background: var(--fg); color: var(--bg); border-radius: 999px; padding: 6px 8px 6px 16px; font-size: 14px; box-shadow: 0 4px 14px rgba(0,0,0,.2); white-space: nowrap; }

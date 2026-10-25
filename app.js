@@ -184,7 +184,9 @@ function ghMessage(items) {
   const parts = [...new Set(items.map(({ path, body: b }) =>
     path === "/me" ? (b.v ? `${MARK[b.v]}${b.why ? ` (${WHY_NOT[b.why]})` : ""}${b.fin ? " — дочитал" : ""}: «${b.title}»` : `снята отметка: «${b.title}»`)
     : path === "/fav" ? `${b.on ? "❤" : "♡ убрано"}: ${book(b.id)}`
-    : path === "/reread" ? `перечитывание ${book(b.id)}: ${b.add ? "+" + b.add : b.del ? "−" + b.del : b.n !== undefined ? "без даты ×" + b.n : b.now ? "перечитываю" : "отложено"}`
+    : path === "/reread" ? `перечитывание ${book(b.id)}: ` + (b.set ? `перечитана ${plural((b.set.d || []).length + (b.set.n || 0), "раз", "раза", "раз")}` +
+        ((b.set.d || []).length ? `, последний раз ${b.set.d[b.set.d.length - 1]}` : "") + (b.set.now ? ", перечитываю" : "")
+      : b.add ? "+" + b.add : b.del ? "−" + b.del : b.n !== undefined ? "без даты ×" + b.n : b.now ? "перечитываю" : "отложено")
     : path === "/quiz" ? `квизы: ответов ${Object.keys(b.items).length}`
     : path === "/dice" ? "книга дня"
     : path === "/feedback" ? `🐞 замечание: ${String(b.text).slice(0, 60)}` : "замечание удалено"))];
@@ -280,6 +282,7 @@ function paintPending() {
 async function refreshFromServer() {
   let m = null, fav = null, rr = null;
   if (state.owner && ghToken()) {
+    ghLoad("private_books.json").catch(() => {});   // для следующего открытия
     [m, fav, rr] = await Promise.all(["me.json", "fav.json", "reread.json"].map(f => ghLoad(f).then(x => x.data).catch(e => {
       if (e.kind === "auth") { localStorage.removeItem("gh-token"); paintGhBar(); }
       return null;
@@ -363,7 +366,7 @@ async function load() {
   // Все данные — сразу и параллельно: раньше база ждала me.json, а тот — library.private.json (на сайте его нет,
   // 404), и в мобильной сети каждый шаг этой цепочки стоил времени.
   const json = u => fetch(u).then(r => r.ok ? r.json() : null).catch(() => null);
-  const libP = json("data/library.json"), meP = json("data/me.json"), themesP = json("data/themes.json");
+  const libP = json("data/library.json"), meP = json("data/me.json"), themesP = json("data/themes.json"), metaP = json("data/shelf_meta.json");
   // Полная база есть только локально; на сайте — публичная.
   const privP = owner ? json("data/library.private.json") : Promise.resolve(null);
   if (owner) document.getElementById("owner-badge").hidden = false;
@@ -394,6 +397,14 @@ async function load() {
   paintNav();
   paintGhBar();
   if (!state.lib.length) state.lib = (await privP) || (await libP) || [];
+  // Скрытые от гостей книги (оценка 1–2★, «не советовать») на сайт не выкладываются — владелец получает их из своего
+  // репозитория. Копия на устройстве — сразу; первый раз — ждём GitHub не дольше 4 с, дальше освежится фоном.
+  if (owner && ghToken() && !state.lib.some(b => b.private)) {
+    const cached = (ghCache()["private_books.json"] || {}).data;
+    const priv = cached || await Promise.race([ghLoad("private_books.json").then(x => x.data).catch(() => null), new Promise(ok => setTimeout(ok, 4000, null))]);
+    if (priv) addPrivate(priv);
+  }
+  state.shelfMeta = await metaP;
   // Отметки, ❤ и перечитывания — сразу из прошлого ответа сервера: свежие догрузит refreshFromServer.
   setMarks(cachedApi("/me") || {});
   if (cachedApi("/fav")) applyFav(cachedApi("/fav"));
@@ -526,7 +537,8 @@ function renderPick() {
   let res = state.lib.filter(b => passes(b, f)).sort((a, b) => pickScore(b, f) - pickScore(a, f));
   const count = document.getElementById("pick-count");
   if (!total) {
-    count.textContent = `Всего книг: ${res.length}. Опишите, чего хочется, или откройте фильтры.`;
+    const [ib, iw] = hiddenNote();
+    count.replaceChildren(`Всего книг: ${shelfTotal()}`, ib, ". Опишите, чего хочется, или откройте фильтры.", iw);
     renderList("pick-list", res.slice(0, 60));
   } else if (res.length >= 8) {
     count.textContent = `Подходит книг: ${res.length}`;
@@ -697,7 +709,9 @@ function renderAll(more) {
   const res = (q ? state.lib.filter(b => q.split(/\s+/).every(w => b._text.includes(w))) : [...state.lib])
     .sort(ALL_SORT[document.getElementById("all-sort").value]);
   state.allShown = more === true ? state.allShown + ALL_PAGE : more === "keep" ? state.allShown : ALL_PAGE;
-  document.getElementById("all-count").textContent = `Книг: ${res.length}` + (res.length > state.allShown ? ` · показаны первые ${state.allShown}` : "");
+  const [ib, iw] = q ? ["", ""] : hiddenNote();
+  document.getElementById("all-count").replaceChildren(`Книг: ${q ? res.length : shelfTotal()}`, ib,
+    res.length > state.allShown ? ` · показаны первые ${state.allShown}` : "", iw);
   coversToggle("all-covers");
   renderList("all-list", res.slice(0, state.allShown), q ? b => matchedContains(b, q) : null, showCovers());
   const btn = document.getElementById("all-more");
@@ -1718,6 +1732,36 @@ function heat(rows, cols, val, fmt, tip) {
         el("span", { class: "sr" }, fmt(v))), [fmt(v), ...tip(r, c)]);
     }))))));
 }
+// Сколько книг на самом деле (как на BookMix). Гостю часть скрыта — в числах она есть, по ⓘ — расшифровка; у владельца
+// с ключом скрытые на полке (🔒), ⓘ объясняет, что гости их не видят.
+function hiddenInfo() {
+  const h = (state.shelfMeta || {}).hidden;
+  if (!h || !h.total) return null;
+  const mine = state.lib.filter(b => b.private).length;
+  return { ...h, unseen: Math.max(0, h.total - mine), mine };
+}
+function addPrivate(priv) {
+  const have = new Set(state.lib.map(b => b.id));
+  for (const b of priv.filter(x => !have.has(x.id))) {
+    b._text = norm([b.title, b.bm_title, ...b.authors, b.orig, ...b.themes, ...(b.tags || []), ...b.genres, ...(b.contains || []),
+      b.series && b.series.name, b.series && b.series.sub].join(" | "));
+    state.lib.push(b);
+  }
+}
+const shelfTotal = () => state.lib.length + ((hiddenInfo() || {}).unseen || 0);
+const hiddenInYear = y => { const h = hiddenInfo(); return h && h.unseen ? (h.years[y] || 0) : 0; };
+// ⓘ после числа и расшифровка отдельной строкой в конце (по нажатию): [кнопка, строка] — или пусто.
+function hiddenNote() {
+  const h = hiddenInfo();
+  if (!h) return ["", ""];
+  const why = [h.low ? `${h.low} — с оценкой 1–2★` : "", h.total - h.low ? `${h.total - h.low} — ${state.owner ? "вы просили не советовать" : "хозяин не советует"}` : ""]
+    .filter(Boolean).join(", ");
+  const info = el("span", { class: "hidden-why", hidden: "" }, h.unseen
+    ? `Видно ${books(state.lib.length)} — с оценкой 3★ и выше. Ещё ${h.unseen} скрыто: ${why}.`
+    : `🔒 ${books(h.mine)} видите только вы: ${why}. Гостям они не показываются, но в числах учтены.`);
+  return [el("button", { class: "info-btn", type: "button", "aria-label": "что скрыто",
+    onclick: e => { e.stopPropagation(); info.hidden = !info.hidden; } }, " ⓘ"), info];
+}
 function statTile(label, value, sub) {
   return el("div", { class: "tile-stat" }, el("div", { class: "ts-l" }, label), el("div", { class: "ts-v" }, value), sub ? el("div", { class: "ts-s" }, sub) : null);
 }
@@ -1756,7 +1800,7 @@ function scrollToChip(row, item) {
 function renderReview(y, nav) {
   const lib = state.lib, box = document.getElementById("stats"), curY = new Date().getFullYear();
   const bs = lib.filter(b => readYear(b) === y).sort((a, b) => a.read.localeCompare(b.read));
-  const prev = lib.filter(b => readYear(b) === y - 1).length;
+  const prev = lib.filter(b => readYear(b) === y - 1).length + hiddenInYear(y - 1);
   const firstYear = new Map();
   for (const b of lib) for (const a of b.authors) { const r = readYear(b); if (r && (!firstYear.has(a) || r < firstYear.get(a))) firstYear.set(a, r); }
   const authors = new Set(bs.flatMap(b => b.authors)), newAuthors = [...authors].filter(a => firstYear.get(a) === y);
@@ -1788,7 +1832,7 @@ function renderReview(y, nav) {
   // Перечитанное в этом году и дочитанное, что ещё не приехало с BookMix.
   const again = lib.flatMap(b => rereadsOf(b).filter(m => +m.slice(0, 4) === y).map(m => ({ b, m }))).sort((a, b) => a.m.localeCompare(b.m));
   const waiting = waitingShelf().filter(m => +(m.date || today()).slice(0, 4) === y);
-  const n = bs.length + waiting.length, delta = n - prev;
+  const n = bs.length + waiting.length + hiddenInYear(y), delta = n - prev;
   const moodText = [moods.length ? `Год вышел ${joinAnd(moods)}, чем обычно.` : "", more.length ? `Больше обычного: ${more.join(", ")}.` : ""].filter(Boolean).join(" ");
   box.replaceChildren(...[
     nav,
@@ -1820,7 +1864,8 @@ function renderReview(y, nav) {
       regions.size ? card("Где побывали", "", hbars([...regions.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([r, n]) => ({ label: r, v: n, tip: [books(n), r] })))) : null),
     again.length ? card(`Перечитано в ${y} году`, "", el("ul", { class: "review-list" }, ...again.map(({ b, m }) =>
       el("li", {}, link(b), el("span", { class: "meta" }, ` — ${MONTHS[+m.slice(5, 7) - 1]}, впервые — ${monthName(b.read)}`))))) : null,
-    card(`Все книги ${y} года`, "", el("div", { id: "review-list", class: "list" })),
+    card(`Все книги ${y} года`, hiddenInYear(y) ? `🔒 И ещё ${books(hiddenInYear(y))} скрыто — оценка 1–2★ или хозяин не советует.` : "",
+      el("div", { id: "review-list", class: "list" })),
   ].filter(Boolean));
   renderList("review-list", [...bs].reverse());
 }
@@ -1902,20 +1947,21 @@ function renderShelfStats(nav) {
   for (const m of waitingShelf()) push(waitByYear, +(m.date || today()).slice(0, 4), m);
   const rrN = y => (rrByYear.get(y) || []).length, waitN = y => (waitByYear.get(y) || []).length;
   const again = lib.filter(b => timesRead(b) > 1).sort((a, b) => timesRead(b) - timesRead(a) || a.title.localeCompare(b.title)).slice(0, 12);
-  const thisYear = (byYear.get(curY) || []).length + waitN(curY);
+  const thisYear = (byYear.get(curY) || []).length + waitN(curY) + hiddenInYear(curY);
   const lastSame = (byYear.get(curY - 1) || []).filter(b => +b.read.slice(5, 7) <= curM).length;
   const diary = dated.filter(b => readYear(b) >= 2013);
   const perYear = diary.length / (curY - 2013 + curM / 12);
 
   // Книги по годам: эпохи различаются заливкой, легенда — карточки эпох под графиком.
-  const max = Math.max(...years.map(y => (byYear.get(y) || []).length + waitN(y)));
+  const max = Math.max(...years.map(y => (byYear.get(y) || []).length + waitN(y) + hiddenInYear(y)));
   const yearCols = columns(years.map(y => {
-    const bs = byYear.get(y) || [], ep = epochOf(y), fav = bs.filter(b => b.fav).length, n = bs.length + waitN(y);
+    const bs = byYear.get(y) || [], ep = epochOf(y), fav = bs.filter(b => b.fav).length, n = bs.length + waitN(y) + hiddenInYear(y);
     const r = bs.filter(b => b.rating), a = r.reduce((s, b) => s + b.rating, 0) / (r.length || 1);
     return { y, v: n, v2: rrN(y), cls: ep.key, sel: state.stYear === y, label_v: n === max || y === curY,
       axis: y === y0 ? y : (y % 5 === 0 && y - y0 >= 3) || y === y1 ? shortYear(y) : "",
       tip: [books(n), `${y} · ${ep.name.toLowerCase()}`, bs.length ? `средняя оценка ${dec1(a)}${fav ? ` · ❤ ${fav}` : ""}` : "",
-        rrN(y) ? `🔁 и перечитано: ${rrN(y)}` : "", waitN(y) ? `✓ из них ждут полки: ${waitN(y)}` : ""].filter(Boolean) };
+        rrN(y) ? `🔁 и перечитано: ${rrN(y)}` : "", waitN(y) ? `✓ из них ждут полки: ${waitN(y)}` : "",
+        hiddenInYear(y) ? `🔒 из них скрыто: ${hiddenInYear(y)}` : ""].filter(Boolean) };
   }), { onclick: x => { state.stYear = state.stYear === x.y ? null : x.y; renderStats(); saveHash(); } });
 
   // Месяцы — только по дневнику: раньше месяц прочтения не записывался.
@@ -1965,7 +2011,7 @@ function renderShelfStats(nav) {
   box.replaceChildren(...[
     nav,
     el("div", { class: "st-tiles" },
-      statTile("Прочитано", books(lib.length), plural(authors.size, "автор", "автора", "авторов")),
+      statTile("Прочитано", books(shelfTotal()), [plural(authors.size, "автор", "автора", "авторов"), ...hiddenNote()]),
       statTile(`В ${curY} году`, books(thisYear), [rrN(curY) ? `+ ${rrN(curY)} перечитано` : "", waitN(curY) ? `ждут полки — ${waitN(curY)}` : "",
         `за то же время в ${curY - 1}-м — ${lastSame}`].filter(Boolean).join(" · ")),
       statTile("В среднем за год", "≈ " + Math.round(perYear), "по дневнику, с 2013-го"),
@@ -1978,11 +2024,12 @@ function renderShelfStats(nav) {
         rrByYear.size ? el("div", { class: "epoch" }, el("div", { class: "epoch-h" }, el("span", { class: "swatch rr" }), el("b", {}, "Перечитано")),
           el("p", {}, "Сверху столбика: BookMix помнит только первое прочтение, повторные отмечаются в карточке книги.")) : null),
       el("details", { class: "st-table" }, el("summary", {}, "Таблицей"),
-        el("table", {}, el("tbody", {}, ...years.filter(y => byYear.has(y) || rrN(y) || waitN(y)).map(y => el("tr", {}, el("th", {}, y),
-          el("td", {}, (byYear.get(y) || []).length + waitN(y), rrN(y) ? ` + ${rrN(y)} перечит.` : ""))))))),
-    sel ? el("section", { class: "st-card", id: "st-year" }, el("h3", {}, `${sel} — ${books(byYear.get(sel).length)} `,
+        el("table", {}, el("tbody", {}, ...years.filter(y => byYear.has(y) || rrN(y) || waitN(y) || hiddenInYear(y)).map(y => el("tr", {}, el("th", {}, y),
+          el("td", {}, (byYear.get(y) || []).length + waitN(y) + hiddenInYear(y), rrN(y) ? ` + ${rrN(y)} перечит.` : ""))))))),
+    sel ? el("section", { class: "st-card", id: "st-year" }, el("h3", {}, `${sel} — ${books(byYear.get(sel).length + hiddenInYear(sel))} `,
         sel >= 2013 ? el("button", { class: "link", onclick: () => { state.stReview = sel; state.stYear = null; renderStats(); saveHash(); window.scrollTo(0, 0); } }, "итоги года →") : null,
         el("button", { class: "link", onclick: () => { state.stYear = null; renderStats(); saveHash(); } }, "✕ свернуть")),
+      hiddenInYear(sel) ? el("p", { class: "meta" }, `🔒 И ещё ${books(hiddenInYear(sel))} скрыто — оценка 1–2★ или хозяин не советует.`) : null,
       rrN(sel) ? el("p", { class: "meta" }, "🔁 Перечитано: ", ...rrByYear.get(sel).flatMap(({ b }, i) => [i ? ", " : "",
         el("a", { href: "#", onclick: e => { e.preventDefault(); openCard(b); } }, "«" + b.title + "»")])) : null,
       el("div", { id: "st-year-list", class: "list" })) : null,
@@ -2076,10 +2123,13 @@ async function applyHash() {
   const book = state.lib.find(x => x.id === +p.get("book"));
   if (book) openCard(book);
 }
-function toast(text) {
-  const t = el("div", { class: "toast", role: "status" }, text);
+// action {label, run} — кнопка в подсказке («Отменить»): подсказка с ней висит дольше.
+function toast(text, action) {
+  document.querySelectorAll(".toast").forEach(x => x.remove());
+  const t = el("div", { class: "toast", role: "status" }, text,
+    action ? el("button", { class: "toast-act", type: "button", onclick: () => { t.remove(); action.run(); } }, action.label) : null);
   document.body.append(t);
-  setTimeout(() => t.remove(), 2200);
+  setTimeout(() => t.remove(), action ? 6000 : 2200);
 }
 async function shareLink(url) {
   if (navigator.share && matchMedia("(pointer: coarse)").matches) {
@@ -2143,7 +2193,7 @@ function libEl(b, extra) {
   return el("div", { class: "book", onclick: () => openCard(b) },
     coverEl(b, "thumb"),
     el("div", {},
-      el("div", { class: "t" }, b.title),
+      el("div", { class: "t" }, b.private ? el("span", { title: "видно только вам" }, "🔒 ") : "", b.title),
       el("div", { class: "a" }, b.authors.join(", "), " ", el("span", { class: "stars" }, stars(b.rating)), b.fav ? " ❤" : ""),
       b.series ? el("div", { class: "ser" }, "📚 ", seriesLabel(b)) : null,
       rereadingNow(b) ? el("div", { class: "ser" }, "📖 перечитывается сейчас")
@@ -2225,6 +2275,14 @@ const lastRead = b => [b.read || "", ...rereadsOf(b)].sort().pop();
 const thisMonth = () => new Date().toISOString().slice(0, 7);
 const monthName = m => m ? `${MONTHS[+m.slice(5, 7) - 1]} ${m.slice(0, 4)}` : "давно";
 function applyReread(all, id, op) {
+  // set — вся запись о книге целиком (так пишет сайт с 26.10.2026; «Отменить» возвращает прежнюю); add/del/n/now —
+  // точечные правки из очереди прежних версий.
+  if (op.set !== undefined) {
+    // Месяцы могут повторяться: дважды перечитанная в одном месяце — два перечитывания.
+    const s = op.set || {}, x = { d: [...(s.d || [])].sort(), ...(s.n > 0 ? { n: s.n } : {}), ...(s.now ? { now: 1 } : {}) };
+    if (x.d.length || x.n || x.now) all[id] = x; else delete all[id];
+    return;
+  }
   const x = all[id] ? { ...all[id], d: [...all[id].d] } : { d: [] };
   if (op.add && !x.d.includes(op.add)) x.d = [...x.d, op.add].sort();
   if (op.del) x.d = x.d.filter(m => m !== op.del);
@@ -2236,38 +2294,57 @@ function setRereads(server) {
   state.rereads = JSON.parse(JSON.stringify(server || {}));
   for (const x of pending()) if (x.path === "/reread") applyReread(state.rereads, x.body.id, x.body);
 }
-function reread(b, op, msg) {
+const rrEntry = b => { const x = state.rereads[b.id] || {}; return { d: [...(x.d || [])], n: x.n || 0, now: x.now ? 1 : 0 }; };
+// Перечитывания книги пишутся всей записью: «Отменить» в подсказке просто возвращает прежнюю — так чинится мисклик.
+function setReread(b, next, msg) {
   if (!haveGh()) return;
-  if ((op.add && !/^\d{4}-(0[1-9]|1[0-2])$/.test(op.add)) || (op.add && op.add > thisMonth())) { toast("Выберите месяц не позже текущего"); return; }
-  applyReread(state.rereads, b.id, op);
-  enqueue("/reread", { id: b.id, ...op }, `rr:${b.id}:${op.add || op.del || (op.n !== undefined ? "n" : "now")}`);
-  if (msg) toast(msg);
+  if (next.d.some(m => !/^\d{4}-(0[1-9]|1[0-2])$/.test(m) || m > thisMonth())) { toast("Выберите месяц не позже текущего"); return; }
+  const prev = rrEntry(b);
+  applyReread(state.rereads, b.id, { set: next });
+  enqueue("/reread", { id: b.id, set: next }, "rr:" + b.id);
+  if (msg) toast(msg, { label: "Отменить", run: () => setReread(b, prev) });
   renderReads();
   if (document.getElementById("card").open && state.cardId === b.id) openCard(b);
 }
+// Сейчас перечитываю → дочитал: перечитывание с датой этого месяца.
+const rrStart = b => setReread(b, { ...rrEntry(b), now: 1 }, "Книга — в «Сейчас читаю»");
+const rrFinish = b => { const x = rrEntry(b); setReread(b, { d: [...x.d, thisMonth()], n: x.n, now: 0 }, `Записал: перечитана в ${MONTHS[new Date().getMonth()]}`); };
+const rrStop = b => setReread(b, { ...rrEntry(b), now: 0 }, "Убрал из «Сейчас читаю»");
 function renderReads() {
   renderAll("keep");
   if (state.me) renderMe(); else renderNowReading();
   if (document.getElementById("tab-stats").classList.contains("active")) renderStats();
 }
-// В карточке книги: когда прочитана и перечитана; владельцу — «перечитываю» и «＋ перечитал» за выбранный месяц.
+// В карточке книги: когда прочитана и сколько раз перечитана. Главное — «сколько»: даты нужны не всем, у последнего
+// перечитывания — по желанию, у промежуточных — тем более. Дата — свойство уже посчитанного перечитывания: поставить
+// её — значит «вспомнить, когда», а не добавить ещё одно; убрать — оставить перечитывание без даты.
 function readsEl(b) {
-  const rr = rereadsOf(b), now = rereadingNow(b), n = undatedOf(b), times = timesRead(b);
-  const month = el("input", { type: "month", class: "rr-month", value: thisMonth(), max: thisMonth(), "aria-label": "Месяц, когда перечитали" });
-  return el("div", { class: "reads" },
-    el("div", { class: "meta" }, "📖 Прочитана: " + monthName(b.read),
-      ...(rr.length ? [" · 🔁 перечитана: ", ...rr.flatMap((m, i) => [i ? ", " : "", monthName(m),
-        state.owner ? el("button", { class: "rr-del", title: "убрать", "aria-label": "убрать " + monthName(m), onclick: () => reread(b, { del: m }) }, "✕") : null])] : []),
-      n ? ` · и ещё ${plural(n, "раз", "раза", "раз")} без даты` : "", times > 1 ? el("b", {}, ` · всего ${plural(times, "раз", "раза", "раз")}`) : ""),
-    now ? el("div", { class: "meta" }, state.owner ? "Перечитываете сейчас" : "Хозяин сейчас перечитывает") : null,
-    state.owner ? el("div", { class: "chips rr-btns" },
-      now ? chip("✓ перечитал", "on", () => reread(b, { add: thisMonth(), now: 0 }, `Записал: перечитана в ${MONTHS[new Date().getMonth()]}`))
-        : chip("📖 перечитываю", "", () => reread(b, { now: 1 }, "Книга — в «Сейчас читаю»")),
-      now ? chip("✕ бросил", "", () => reread(b, { now: 0 })) : null,
-      month, chip("＋ перечитал", "", () => reread(b, { add: month.value }, "Записал перечитывание"))) : null,
-    // Давние и детские перечитывания: помнится «сколько раз», а не когда. В годы не идут, только в «всего N раз».
-    state.owner ? el("div", { class: "rr-undated meta" }, "Раньше, без даты: ",
-      chip("−", "", () => n && reread(b, { n: n - 1 })), el("b", { class: "rr-n" }, "×" + n), chip("+", "", () => n < 99 && reread(b, { n: n + 1 }))) : null);
+  const x = rrEntry(b), again = x.d.length + x.n, times = 1 + again, last = x.d[x.d.length - 1], others = x.d.slice(0, -1);
+  const head = el("div", { class: "meta" }, "📖 Впервые прочитана: " + monthName(b.read), times > 1 ? el("b", {}, ` · всего ${plural(times, "раз", "раза", "раз")}`) : "");
+  if (!state.owner) return el("div", { class: "reads" }, head,
+    again ? el("div", { class: "meta" }, "🔁 Перечитана" + (x.d.length ? ": " + x.d.map(monthName).join(", ") : "") +
+      (x.n ? (x.d.length ? ` и ещё ${plural(x.n, "раз", "раза", "раз")} без даты` : ` ${plural(x.n, "раз", "раза", "раз")}`) : "")) : null,
+    x.now ? el("div", { class: "meta" }, "📖 Хозяин сейчас перечитывает") : null);
+  const month = (value, onchange, label) => el("input", { type: "month", class: "rr-month", value: value || "", max: thisMonth(), "aria-label": label,
+    onchange: e => e.target.value && onchange(e.target.value) });
+  const row = (label, ...kids) => el("div", { class: "rr-row" }, el("span", { class: "rr-l" }, label), ...kids);
+  return el("div", { class: "reads" }, head,
+    row("Перечитывал:",
+      chip("−", "", () => again && setReread(b, x.n ? { ...x, n: x.n - 1 } : { ...x, d: x.d.slice(0, -1) }, `Перечитывал: ${again - 1 ? "×" + (again - 1) : "ни разу"}`)),
+      el("b", { class: "rr-n" }, again ? "×" + again : "нет"),
+      chip("+", "", () => again < 99 && setReread(b, { ...x, n: x.n + 1 }, `Перечитывал: ×${again + 1}`))),
+    again ? row("Последний раз:",
+      month(last, v => setReread(b, last ? { ...x, d: [...others, v] } : { ...x, d: [v], n: x.n - 1 }, "Последний раз — " + monthName(v)), "Когда перечитали последний раз"),
+      last ? el("button", { class: "rr-del", type: "button", onclick: () => setReread(b, { ...x, d: others, n: x.n + 1 }, "Дата убрана — перечитывание осталось без даты") }, "✕ без даты")
+        : el("span", { class: "meta" }, "не обязательно")) : null,
+    // Промежуточные даты — только если хочется: «вспомнить» дату ещё одного перечитывания из тех, что без даты.
+    others.length || (last && x.n) ? row("Другие даты:",
+      ...others.map((m, i) => el("span", { class: "rr-date" }, monthName(m),
+        el("button", { class: "rr-del", type: "button", "aria-label": "убрать дату " + monthName(m), onclick: () => setReread(b, { ...x, d: x.d.filter((y, j) => j !== i), n: x.n + 1 }, "Дата убрана") }, "✕"))),
+      x.n ? month("", v => setReread(b, { ...x, d: [...x.d, v], n: x.n - 1 }, "Добавил дату — " + monthName(v)), "Ещё одна дата перечитывания") : null) : null,
+    x.now ? el("div", { class: "meta" }, "📖 Перечитываете сейчас") : null,
+    el("div", { class: "chips rr-btns" }, ...(x.now ? [chip("✓ перечитал", "on", () => rrFinish(b)), chip("✕ бросил", "", () => rrStop(b))]
+      : [chip("📖 перечитываю сейчас", "", () => rrStart(b))])));
 }
 // Перечитываемая книга в «Сейчас читаю».
 function rereadEl(b) {
@@ -2278,8 +2355,7 @@ function rereadEl(b) {
       el("div", { class: "a" }, b.authors.join(", "), " ", el("span", { class: "stars" }, stars(b.rating))),
       el("div", { class: "why" }, `🔁 Перечитываете — впервые ${monthName(b.read)}` + (rr.length ? `, ещё раз — ${rr.map(monthName).join(", ")}` : ""))),
     state.owner ? el("div", { class: "rec-foot" }, el("div", { class: "recbtns" },
-      chip("✓ перечитал", "on", () => reread(b, { add: thisMonth(), now: 0 }, `Записал: перечитана в ${MONTHS[new Date().getMonth()]}`)),
-      chip("✕ бросил", "", () => reread(b, { now: 0 })))) : null);
+      chip("✓ перечитал", "on", () => rrFinish(b)), chip("✕ бросил", "", () => rrStop(b)))) : null);
 }
 
 function toggleFav(b) {
@@ -2306,6 +2382,7 @@ function openCard(b) {
         el("div", { class: "meta" }, [b.form, b.length].join(" · ")),
         el("div", { class: "stars" }, stars(b.rating)),
         b.shelf === "top" ? el("div", { class: "meta" }, "🏆 в топе владельца") : null,
+        b.private ? el("div", { class: "meta" }, "🔒 Видно только вам: гостям книга не показывается (оценка 1–2★ или «не советовать»).") : null,
         state.owner ? el("button", { class: "chip " + (b.fav ? "on" : ""), onclick: () => toggleFav(b) }, b.fav ? "❤ любимое — убрать" : "♡ в любимое")
           : b.fav ? el("div", { class: "meta" }, "❤ любимое владельца") : null)),
     readsEl(b),
@@ -2472,7 +2549,7 @@ async function openFeedback() {
 // Сайт открывается из кэша своей версии (sw.js). Выкладка поднимает номер версии здесь и в sw.js; новая версия
 // ставится фоном и ждёт — плашка «Обновить» включает её (сообщение skip-waiting → смена Service Worker'а →
 // перезагрузка). Без Service Worker'а (тесты, старые браузеры) кнопка просто перезагружает страницу.
-const siteVer = "bookshelf-v55";
+const siteVer = "bookshelf-v56";
 let swReg = null, updating = false;
 const showUpdate = () => { document.getElementById("update-bar").hidden = false; };
 function applyUpdate() {

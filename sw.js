@@ -3,11 +3,11 @@
 // и основные данные лежат в кэше своей версии (CACHE поднимает update.sh publish — и здесь, и в app.js): новая
 // версия скачивается целиком при установке и включается кнопкой «Обновить» (или при следующем запуске), так что
 // файлы разных версий не смешиваются — и чистить кэш вручную по-прежнему не нужно.
-const CACHE = "bookshelf-v55";
+const CACHE = "bookshelf-v56";
 const COVERS = "covers-v1";        // обложки: свои и FantLab — по адресу не меняются, хранятся между версиями
 const SCHEME = "scheme-cache-first";   // метка: этот Service Worker уже «из кэша» (см. install)
 const PRECACHE = ["./", "index.html", "style.css", "app.js", "manifest.webmanifest", "icon.svg", "icon-192.png",
-  "data/library.json", "data/me.json", "data/picks.json", "data/themes.json", "data/feedback.json", "data/owner_public.json"];
+  "data/library.json", "data/me.json", "data/picks.json", "data/themes.json", "data/feedback.json", "data/owner_public.json", "data/shelf_meta.json"];
 // Меняется без новой версии (понедельничное обновление подборок и того, что гостям видно из отметок владельца) —
 // освежается фоном; подборки страница перерисовывает тихо, отметки подхватит со следующей сверки.
 const LIVE = ["data/picks.json", "data/owner_public.json"];
