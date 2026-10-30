@@ -269,8 +269,12 @@ async function flush() {
   clearTimeout(flushTimer);
   paintPending();
   try {
-    // Данные владельца — в GitHub, файл за файлом. Без ключа — ждут в очереди (плашка просит ключ).
-    if (ghToken()) for (const file of new Set(pending().filter(y => GH_FILE[y.path]).map(y => GH_FILE[y.path]))) await ghFlush(file);
+    // Данные владельца — в GitHub, файл за файлом. Без ключа — ждут в очереди (плашка просит ключ). Пока шла запись,
+    // в очередь могло добавиться новое — ответ на совет друга, например, это сразу две записи, совет и отметка, — и
+    // его файл в этот проход не попал: проходить, пока очередь не опустеет, а не ждать следующего нажатия или F5.
+    let files;
+    while (ghToken() && (files = [...new Set(pending().map(y => GH_FILE[y.path]).filter(Boolean))]).length)
+      for (const file of files) await ghFlush(file);
     flushDelay = 3000;
     setFlushErr(null);
     refreshFromServer();
@@ -2646,7 +2650,7 @@ async function openFeedback() {
 // Сайт открывается из кэша своей версии (sw.js). Выкладка поднимает номер версии здесь и в sw.js; новая версия
 // ставится фоном и ждёт — плашка «Обновить» включает её (сообщение skip-waiting → смена Service Worker'а →
 // перезагрузка). Без Service Worker'а (тесты, старые браузеры) кнопка просто перезагружает страницу.
-const siteVer = "bookshelf-v60";
+const siteVer = "bookshelf-v61";
 let swReg = null, updating = false;
 const showUpdate = () => { document.getElementById("update-bar").hidden = false; };
 function applyUpdate() {
