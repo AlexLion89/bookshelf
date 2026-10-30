@@ -56,30 +56,29 @@ const THEME_SYNONYMS = [
 ];
 
 const state = { lib: [], vocab: {}, pick: emptyFilter(), like: [] };
-// Советы друзей — Cloudflare Worker (исходник в bookshelf-data/worker): гость пишет без ключа, для этого нужен сервер.
-// Данные владельца — приватный репозиторий GitHub (см. «данные владельца» ниже).
-const API = "https://shelf-api.sirenyov.workers.dev";
-// Из мобильной сети соединение с Worker (Cloudflare) то медленное, то рвётся («Load failed», «Fetch is aborted»):
-// до 15 секунд на попытку и три попытки. Все записи, кроме нового предложения, можно безопасно повторить —
-// они ставят значение, а не добавляют.
-async function api(path, body, { tries = body && path === "/suggest" ? 1 : 3, timeout = 15000 } = {}) {
-  const key = localStorage.getItem("owner-key");
+// Советы друзей — функция Yandex Cloud (исходник в bookshelf-data/suggest): гость пишет без ключа, для этого нужен
+// сервер. До 30.10.2026 это делал Cloudflare Worker, но Cloudflare в мобильных сетях России душат. Советы лежат
+// в suggest.json репозитория владельца: ответы на них («в план», «скрыть») сайт пишет туда сам, как отметки.
+const SUGGEST = "https://functions.yandexcloud.net/d4eh7jjn89b2kkcea4d6";
+// Мобильная связь рвётся («Load failed», «Fetch is aborted»): три попытки по 15 секунд. Совет можно отправить
+// повторно без дубля — у него свой id, и функция второй раз его не запишет. Тело — text/plain: без предварительного
+// OPTIONS, на круг по сети меньше.
+async function suggestApi(body, { tries = 3, timeout = 15000 } = {}) {
   let r;
   for (let i = 0; ; i++) {
-    const opt = { signal: AbortSignal.timeout(timeout), headers: key ? { Authorization: "Bearer " + key } : {} };
-    if (body) Object.assign(opt, { method: "POST", body: JSON.stringify(body), headers: { ...opt.headers, "Content-Type": "application/json" } });
-    try { r = await fetch(API + path, opt); break; } catch (e) {
+    const opt = { signal: AbortSignal.timeout(timeout), ...(body ? { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "text/plain;charset=UTF-8" } } : {}) };
+    try { r = await fetch(SUGGEST, opt); if (r.status < 500 || i + 1 >= tries) break; } catch (e) {
       if (i + 1 >= tries) throw Object.assign(new Error("нет связи с сервером — попробуйте ещё раз"), { network: true });
-      await new Promise(ok => setTimeout(ok, 1000 * (i + 1)));
     }
+    await new Promise(ok => setTimeout(ok, 1000 * (i + 1)));
   }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(d.error || "ошибка " + r.status), { status: r.status });
   return d;
 }
-// Последний ответ сервера — в localStorage. Worker живёт на Cloudflare, а его в мобильных сетях России душат:
-// без кэша отметки, «Сейчас читаю» и советы друзей ждали ответа по полминуты (а то и до VPN). Теперь сайт сразу
-// рисует то, что видел в прошлый раз, а свежее догружает фоном — одна попытка, недолго; запись — через очередь.
+// Последний ответ сервера — в localStorage: в мобильной сети без него отметки, «Сейчас читаю» и советы друзей ждали
+// ответа по полминуты (тогда всё жило на Cloudflare). Сайт сразу рисует то, что видел в прошлый раз, а свежее
+// догружает фоном; запись — через очередь.
 const API_CACHE = "api-cache";
 const apiCache = () => JSON.parse(localStorage.getItem(API_CACHE) || "{}");
 const cachedApi = path => (apiCache()[path] || {}).data;
@@ -88,29 +87,18 @@ function cacheApi(path, data) {
   c[path] = { at: Date.now(), data };
   try { localStorage.setItem(API_CACHE, JSON.stringify(c)); } catch { /* переполнен — обойдёмся без кэша */ }
 }
-async function apiGet(path) {
-  const d = await api(path, null, { tries: 1, timeout: 10000 });
-  cacheApi(path, d);
-  return d;
-}
-// Ответ на совет друга — в Worker, его паролем: спрашивается один раз и запоминается в браузере.
-function haveKey() {
-  if (localStorage.getItem("owner-key")) return true;
-  const k = prompt("Пароль владельца для советов друзей (запомнится на этом устройстве):");
-  if (k) localStorage.setItem("owner-key", k);
-  return !!k;
-}
 
 // ---------- данные владельца: приватный репозиторий GitHub ----------
-// Отметки, ❤, перечитывания, квизы, книга дня, замечания — в AlexLion89/bookshelf-owner через GitHub API: с мобильного
-// в РФ он отвечает (замер: 6 из 6 за 0,2 с), а Cloudflare-Worker — нет. Ключ — токен GitHub только к этому
-// репозиторию (Contents: чтение и запись), вводится на каждом устройстве один раз. Каждое изменение — коммит, история
-// репозитория — резервная копия. Сборка сайта читает его копию (scripts/owner_data.py), гостям — data/owner_public.json.
+// Отметки, ❤, перечитывания, квизы, книга дня, замечания, ответы на советы друзей — в AlexLion89/bookshelf-owner через
+// GitHub API: с мобильного в РФ он отвечает (замер: 6 из 6 за 0,2 с), а Cloudflare-Worker — нет. Ключ — токен GitHub
+// только к этому репозиторию (Contents: чтение и запись), вводится на каждом устройстве один раз. Каждое изменение —
+// коммит, история репозитория — резервная копия. Сборка сайта читает его копию (scripts/owner_data.py), гостям —
+// data/owner_public.json.
 const GH = "https://api.github.com", GH_REPO = "AlexLion89/bookshelf-owner";
 const GH_FILE = { "/me": "me.json", "/fav": "fav.json", "/reread": "reread.json", "/quiz": "quiz.json", "/dice": "dice.json",
-  "/feedback": "feedback.json", "/feedback/del": "feedback.json" };
+  "/feedback": "feedback.json", "/feedback/del": "feedback.json", "/suggest/status": "suggest.json", "/suggest/hide": "suggest.json" };
 const GH_EMPTY = { "me.json": {}, "fav.json": { on: [], off: [] }, "reread.json": {}, "quiz.json": {}, "dice.json": [], "feedback.json": [],
-  "private_books.json": [] };
+  "suggest.json": [], "private_books.json": [] };
 const ghToken = () => localStorage.getItem("gh-token");
 // Ключ, вставленный из заметок или мессенджера, бывает с пробелами, кавычками, переводом строки и BOM.
 const cleanKey = s => String(s ?? "").replace(/[\uFEFF\s"'«»`]/g, "");
@@ -199,6 +187,11 @@ function applyOwner(data, path, b) {
   } else if (path === "/feedback") {
     if (!data.some(x => x.id === b.id)) data = [...data, { id: b.id, at: b.at || Date.now(), text: b.text, ctx: b.ctx || "" }].slice(-200);
   } else if (path === "/feedback/del") data = data.filter(x => x.id !== b.id);
+  else if (path === "/suggest/status" || path === "/suggest/hide") {
+    const x = data.find(s => s.id === b.id);   // совета нет — его убрали из файла руками: правка просто не нужна
+    if (x && path === "/suggest/status") x.status = b.v || null;
+    if (x && path === "/suggest/hide") x.hidden = !!b.hidden;
+  }
   return data;
 }
 // Сообщение коммита — по-человечески: история репозитория читается как дневник отметок.
@@ -213,6 +206,8 @@ function ghMessage(items) {
       : b.add ? "+" + b.add : b.del ? "−" + b.del : b.n !== undefined ? "без даты ×" + b.n : b.now ? "перечитываю" : "отложено")
     : path === "/quiz" ? `квизы: ответов ${Object.keys(b.items).length}`
     : path === "/dice" ? "книга дня"
+    : path === "/suggest/status" ? `совет${b.from ? " " + b.from : ""} «${b.title || "?"}»: ${b.v ? MARK[b.v] : "ответ снят"}`
+    : path === "/suggest/hide" ? `совет «${b.title || "?"}» ${b.hidden ? "скрыт" : "возвращён"}`
     : path === "/feedback" ? `🐞 замечание: ${String(b.text).slice(0, 60)}` : "замечание удалено"))];
   return parts.slice(0, 3).join("; ") + (parts.length > 3 ? ` и ещё ${parts.length - 3}` : "");
 }
@@ -273,12 +268,9 @@ async function flush() {
   flushing = true;
   clearTimeout(flushTimer);
   paintPending();
-  let x;
   try {
     // Данные владельца — в GitHub, файл за файлом. Без ключа — ждут в очереди (плашка просит ключ).
     if (ghToken()) for (const file of new Set(pending().filter(y => GH_FILE[y.path]).map(y => GH_FILE[y.path]))) await ghFlush(file);
-    // Ответы на советы друзей — в Worker, по одному.
-    if (localStorage.getItem("owner-key")) while ((x = pending().find(y => !GH_FILE[y.path]))) { await api(x.path, x.body); dropSent([x]); }
     flushDelay = 3000;
     setFlushErr(null);
     refreshFromServer();
@@ -290,17 +282,7 @@ async function flush() {
       paintGhBar();
       setFlushErr("ключ данных не подошёл: " + e.message, true);
       alert("Ключ данных не подошёл (" + e.message + ") — введите его заново на плашке вверху. Несохранённые отметки подождут.");
-    } else if (e.status === 401) {
-      localStorage.removeItem("owner-key");
-      setFlushErr("пароль для советов друзей не подошёл", true);
-      alert("Пароль для советов друзей не подошёл — он спросится снова. Несохранённые ответы подождут.");
-    } else if (e.status === 404) {
-      // Адреса нет — значит, Worker в Cloudflare ещё старый (код вставляют вручную): запись ждёт, а не теряется.
-      setFlushErr(`Worker в Cloudflare не знает ${x.path} — повторю через минуту`);
-      flushTimer = setTimeout(flush, 60000);
-    } else if (e.status >= 400 && e.status < 500) {
-      savePending(pending().filter(y => y !== x && y.key !== x.key));   // сервер такое не примет никогда — не держать
-    } else if (e.kind === "net" || e.kind === "conflict" || e.network || e.status >= 500) {
+    } else if (e.kind === "net" || e.kind === "conflict") {
       setFlushErr(`${e.kind === "conflict" ? "файл всё время меняется с другого устройства" : e.message} — повторю через ${Math.round(flushDelay / 1000)} с`);
       flushTimer = setTimeout(flush, flushDelay);
       flushDelay = Math.min(flushDelay * 2, 120000);
@@ -322,22 +304,16 @@ function paintPending() {
 }
 // Окно по нажатию на «⏳»: что ждёт, почему и что с этим сделать. Раньше очередь, которой мешала не сеть, а, скажем,
 // ключ, висела молча — и не было видно ни причины, ни того, что именно не сохранилось.
-function pendingLabel(x) {
-  if (GH_FILE[x.path]) return ghMessage([x]);
-  return x.path === "/suggest/status" ? `совет друга${x.body.title ? ` «${x.body.title}»` : ""}: ${x.body.v || "отметка снята"}`
-    : `совет друга: ${x.body.hidden ? "скрыть" : "вернуть"}`;
-}
+const pendingLabel = x => ghMessage([x]);
 function paintPendingDlg() {
   const dlg = document.getElementById("pend"), q = pending(), err = flushErr();
-  const needGh = q.some(x => GH_FILE[x.path]) && !ghToken(), needPass = q.some(x => !GH_FILE[x.path]) && !localStorage.getItem("owner-key");
+  const needGh = q.some(x => GH_FILE[x.path]) && !ghToken();
   const at = t => new Date(t).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
   const retry = () => { flushDelay = 3000; flush(); };
   dlg.replaceChildren(el("div", { class: "cardbody" }, el("button", { class: "close", onclick: () => dlg.close() }, "×"),
     el("h2", {}, q.length ? `⏳ Ждут сохранения: ${q.length}` : "✓ Всё сохранено"),
     needGh ? el("p", { class: "pend-why" }, "На этом устройстве нет ключа данных — отметки ждут его. ",
       el("button", { class: "chip", onclick: () => haveGh() }, "Ввести ключ")) : null,
-    needPass ? el("p", { class: "pend-why" }, "Ответы на советы друзей ждут пароль владельца. ",
-      el("button", { class: "chip", onclick: () => haveKey() && retry() }, "Ввести пароль")) : null,
     err && q.length ? el("p", { class: "pend-why" }, `Последняя попытка в ${at(err.at)}: ${err.text}`) : null,
     el("div", { class: "pend-list" }, ...q.map(x => el("div", { class: "pend-item" }, el("span", {}, pendingLabel(x)),
       el("button", { class: "link", onclick: () => {
@@ -423,7 +399,6 @@ async function ownerLogin() {
 }
 function ownerLogout() {
   localStorage.removeItem("owner");
-  localStorage.removeItem("owner-key");
   localStorage.removeItem("gh-token");
   localStorage.removeItem(GH_CACHE);
   localStorage.removeItem(API_CACHE);   // в кэше — то, что видит владелец (скрытые советы, все отметки), гостю незачем
@@ -433,6 +408,8 @@ function ownerLogout() {
 async function load() {
   if (new URLSearchParams(location.search).has("me")) localStorage.setItem("owner", "1");
   const owner = localStorage.getItem("owner") === "1";
+  // Пароль от Cloudflare Worker (ответы на советы друзей до 30.10.2026) больше не нужен — не держать его на устройстве.
+  localStorage.removeItem("owner-key");
   // Все данные — сразу и параллельно: раньше база ждала me.json, а тот — library.private.json (на сайте его нет,
   // 404), и в мобильной сети каждый шаг этой цепочки стоил времени.
   const json = u => fetch(u).then(r => r.ok ? r.json() : null).catch(() => null);
@@ -1473,13 +1450,15 @@ function shelfMatch(title, author, fl) {
   return awardHit({ t: title, a: author || "", fl });
 }
 // Советы — сразу из прошлого ответа, свежий список фоном и не чаще раза в минуту: раньше каждый заход на вкладку
-// заново ждал сервер (в мобильной сети — до полуминуты).
+// заново ждал сервер (в мобильной сети — до полуминуты). Владелец с ключом видит и скрытые советы — читает файл
+// в репозитории сам; гость — через функцию.
+const loadSuggest = () => state.owner && ghToken() ? ghLoad("suggest.json").then(x => x.data) : suggestApi(null, { tries: 1, timeout: 10000 });
 async function openSuggest() {
   // В памяти — свежее кэша: там уже ответы владельца, поставленные на этой странице.
   const box = document.getElementById("sg-list"), cached = state.sgList || cachedApi("/suggest");
   if (cached) { state.sgList = cached; renderSuggest(); } else box.replaceChildren(el("div", { class: "count" }, "Загружаю…"));
   if (cached && Date.now() - (state.sgAt || 0) < 60000) return;
-  const fresh = apiGet("/suggest").then(d => { state.sgList = d; state.sgAt = Date.now(); renderSuggest(); })
+  const fresh = loadSuggest().then(d => { cacheApi("/suggest", d); state.sgList = d; state.sgAt = Date.now(); renderSuggest(); })
     .catch(() => { if (!cached) box.replaceChildren(el("div", { class: "count" }, "Список сейчас недоступен — нет связи с сервером. Попробуйте позже.")); });
   if (!cached) await fresh;
 }
@@ -1517,13 +1496,13 @@ function sgStatusEl(x) {
   return text ? el("div", { class: "why" }, text) : null;
 }
 function sgOwner(path, body) {
-  if (!haveKey()) return;
+  if (!haveGh()) return;
   const x = state.sgList.find(y => y.id === body.id);
-  // Книга и друг — только для показа до ответа сервера; Worker берёт их из самого предложения.
-  if (path === "/suggest/status" && x.fantlab) body = { ...body, fantlab: x.fantlab, title: x.title, author: x.author, from: x.from };
+  // Ответ ложится в сам совет по id; книга и друг — для сообщения коммита, окна «⏳» и отметки до сохранения.
+  body = { ...body, title: x.title, from: x.from, ...(path === "/suggest/status" && x.fantlab ? { fantlab: x.fantlab, author: x.author } : {}) };
   enqueue(path, body, path + ":" + body.id);
-  // Отметка владельца живёт в репозитории — туда же: «взял в план» по совету друга видно в «Мне почитать» везде.
-  if (path === "/suggest/status" && x.fantlab && ghToken())
+  // Отметка владельца — в его me.json: «взял в план» по совету друга видно в «Мне почитать» везде.
+  if (path === "/suggest/status" && x.fantlab)
     enqueue("/me", { fantlab: x.fantlab, v: body.v, title: x.title, authors: x.author ? [x.author] : [], from: x.from, at: Date.now() }, "me:" + x.fantlab);
   setMarks(state.marks);   // сразу наложить отметку на «Мне почитать»
   renderSuggest();
@@ -1550,18 +1529,27 @@ document.getElementById("sg-search").addEventListener("input", e => {
   }, 450);
 });
 document.getElementById("sg-title").addEventListener("input", () => { sgPicked = null; });
+// id совета живёт до успешной отправки: «Не отправилось» и повторное нажатие с тем же текстом дубля не дадут, даже
+// если первый раз совет дошёл, а ответ потерялся. Поменяли текст — это уже новый совет.
+let sgId = null;
+document.getElementById("sg-form").addEventListener("input", () => { sgId = null; });
 document.getElementById("sg-form").addEventListener("submit", async e => {
   e.preventDefault();
   const v = id => document.getElementById(id).value.trim();
   const status = document.getElementById("sg-status");
   if (!v("sg-title") || !v("sg-from")) { status.textContent = "Нужны название и ваше имя."; return; }
   status.textContent = "Отправляю…";
+  sgId = sgId || "sg-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
   try {
-    await api("/suggest", { title: v("sg-title"), author: v("sg-author"), note: v("sg-note"), from: v("sg-from"), fantlab: sgPicked });
+    const d = await suggestApi({ id: sgId, title: v("sg-title"), author: v("sg-author"), note: v("sg-note"), from: v("sg-from"), fantlab: sgPicked });
+    sgId = null;
     localStorage.setItem("sg-from", v("sg-from"));
     for (const id of ["sg-title", "sg-author", "sg-note"]) document.getElementById(id).value = "";
     document.getElementById("sg-picked").textContent = ""; sgPicked = null;
     status.textContent = "Спасибо! Предложение отправлено.";
+    // Гостю функция сразу вернула список с его советом; владельцу нужен файл целиком, со скрытыми.
+    if (state.owner && ghToken()) state.sgAt = 0;
+    else { cacheApi("/suggest", d.list); state.sgList = d.list; state.sgAt = Date.now(); }
     openSuggest();
   } catch (err) { status.textContent = "Не отправилось: " + err.message; }
 });
@@ -2658,7 +2646,7 @@ async function openFeedback() {
 // Сайт открывается из кэша своей версии (sw.js). Выкладка поднимает номер версии здесь и в sw.js; новая версия
 // ставится фоном и ждёт — плашка «Обновить» включает её (сообщение skip-waiting → смена Service Worker'а →
 // перезагрузка). Без Service Worker'а (тесты, старые браузеры) кнопка просто перезагружает страницу.
-const siteVer = "bookshelf-v59";
+const siteVer = "bookshelf-v60";
 let swReg = null, updating = false;
 const showUpdate = () => { document.getElementById("update-bar").hidden = false; };
 function applyUpdate() {
