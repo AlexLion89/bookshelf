@@ -56,26 +56,13 @@ const THEME_SYNONYMS = [
 ];
 
 const state = { lib: [], vocab: {}, pick: emptyFilter(), like: [] };
-// Советы друзей — функция Yandex Cloud (исходник в bookshelf-data/suggest): гость пишет без ключа, для этого нужен
-// сервер. До 30.10.2026 это делал Cloudflare Worker, но Cloudflare в мобильных сетях России душат. Советы лежат
-// в suggest.json репозитория владельца: ответы на них («в план», «скрыть») сайт пишет туда сам, как отметки.
+// Советы друзей — два независимых обработчика: Yandex Cloud и Cloudflare.
+// Оба пишут suggest.json приватного bookshelf-owner; отметки владельца идут в GitHub напрямую.
+// Старый Cloudflare Worker shelf-api с отдельным KV в этих маршрутах не участвует.
 const SUGGEST = "https://functions.yandexcloud.net/d4eh7jjn89b2kkcea4d6";
-// Мобильная связь рвётся («Load failed», «Fetch is aborted»): три попытки по 15 секунд. Совет можно отправить
-// повторно без дубля — у него свой id, и функция второй раз его не запишет. Тело — text/plain: без предварительного
-// OPTIONS, на круг по сети меньше.
-async function suggestApi(body, { tries = 3, timeout = 15000 } = {}) {
-  let r;
-  for (let i = 0; ; i++) {
-    const opt = { signal: AbortSignal.timeout(timeout), ...(body ? { method: "POST", body: JSON.stringify(body), headers: { "Content-Type": "text/plain;charset=UTF-8" } } : {}) };
-    try { r = await fetch(SUGGEST, opt); if (r.status < 500 || i + 1 >= tries) break; } catch (e) {
-      if (i + 1 >= tries) throw Object.assign(new Error("нет связи с сервером — попробуйте ещё раз"), { network: true });
-    }
-    await new Promise(ok => setTimeout(ok, 1000 * (i + 1)));
-  }
-  const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw Object.assign(new Error(d.error || "ошибка " + r.status), { status: r.status });
-  return d;
-}
+const SUGGEST_BACKUP = "https://shelf-suggest-global.sirenyov.workers.dev";
+// Второй путь запускается при сбое или через 1,5 с ожидания; обе функции пишут в один GitHub-файл.
+const suggestApi = createSuggestTransport([SUGGEST, SUGGEST_BACKUP]);
 // Последний ответ сервера — в localStorage: в мобильной сети без него отметки, «Сейчас читаю» и советы друзей ждали
 // ответа по полминуты (тогда всё жило на Cloudflare). Сайт сразу рисует то, что видел в прошлый раз, а свежее
 // догружает фоном; запись — через очередь.
@@ -2650,7 +2637,7 @@ async function openFeedback() {
 // Сайт открывается из кэша своей версии (sw.js). Выкладка поднимает номер версии здесь и в sw.js; новая версия
 // ставится фоном и ждёт — плашка «Обновить» включает её (сообщение skip-waiting → смена Service Worker'а →
 // перезагрузка). Без Service Worker'а (тесты, старые браузеры) кнопка просто перезагружает страницу.
-const siteVer = "bookshelf-v64";
+const siteVer = "bookshelf-v65";
 let swReg = null, updating = false;
 const showUpdate = () => { document.getElementById("update-bar").hidden = false; };
 function applyUpdate() {
