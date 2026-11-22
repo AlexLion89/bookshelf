@@ -15,6 +15,7 @@ body { margin: 0; font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-ser
 header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line);
          padding: max(10px, env(safe-area-inset-top)) 14px 0; }
 h1 { font-size: 19px; margin: 0 0 8px; }
+.shelf-owner-name { white-space: nowrap; }
 #owner-badge { font-size: 13px; color: var(--muted); font-weight: normal; }
 nav { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
 nav button { border: 0; background: none; padding: 8px 10px; font: inherit; font-size: 15px; color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
@@ -304,7 +305,7 @@ dialog.nav-sheet { margin: auto 0 0; width: 100%; max-width: 100%; border-radius
 /* Телефон: вкладки — панелью внизу экрана (значок и короткая подпись), шапка уезжает при прокрутке. */
 @media (max-width: 760px) {
   header { position: relative; padding-bottom: 8px; }
-  h1 { margin: 0; font-size: 18px; white-space: nowrap; }
+  h1 { margin: 0; font-size: 18px; }
   #owner-badge { font-size: 0; } #owner-badge::after { content: "🔑"; font-size: 14px; }
   .pending { position: fixed; z-index: 9; top: max(8px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); }
   nav { position: fixed; z-index: 8; left: 0; right: 0; bottom: 0; gap: 0; overflow: visible; background: var(--card); border-top: 1px solid var(--line); padding: 0 2px env(safe-area-inset-bottom); }
