@@ -321,6 +321,11 @@ dialog.nav-sheet { margin: auto 0 0; width: 100%; max-width: 100%; border-radius
   .st-nav .chip, .scroll-row .chip { flex: none; }
   #aw-list { display: none; } .aw-pick { display: block; }
 }
+/* На экране шириной 320 px подписи нижней панели целиком помещаются между соседними кнопками. */
+@media (max-width: 360px) {
+  nav button { padding-inline: 0; }
+  nav button::after { font-size: clamp(10px, 3.2vw, 11px); }
+}
 /* Узкий экран: подписи полос в статистике — над полосой, иначе «Россия и бывший СССР» обрезается до «Россия и бы…». */
 @media (max-width: 560px) {
   .hb-row { grid-template-columns: 1fr; gap: 1px; padding: 4px 0; }
