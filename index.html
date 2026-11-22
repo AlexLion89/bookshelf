@@ -23,22 +23,33 @@
   <button id="theme" class="theme" type="button"></button>
   <button id="share" class="share" type="button" title="Скопировать ссылку на то, что сейчас на экране">🔗<span> Поделиться</span></button>
   <!-- На телефоне вкладки — панель внизу: значок (data-icon) и короткая подпись (data-short), остальное — в «Ещё». -->
-  <nav>
-    <button data-tab="pick" data-icon="🔍" class="active">Подобрать</button>
-    <button data-tab="like" data-icon="🔁" data-short="Похожее">Похоже на…</button>
-    <button data-tab="all" data-icon="📚">Все книги</button>
+  <nav aria-label="Разделы книжной полки">
+    <button data-tab="pick" data-icon="🔍" data-short="По вкусу" class="active" aria-current="page">По настроению</button>
+    <button data-tab="like" data-icon="🔁" data-short="Похожие">Похожие книги</button>
+    <button data-tab="all" data-icon="📚" data-short="Прочитано">Прочитанное</button>
+    <button data-tab="picks" data-icon="✨" id="picks-btn">Подборки</button>
     <button data-tab="fav" data-icon="❤️">Любимое</button>
     <button data-tab="me" data-icon="📖" data-short="Почитать" id="me-btn" hidden>Мне почитать</button>
-    <button data-tab="picks" data-icon="✨" data-short="Подборки" id="picks-btn" hidden>Новинки и подборки</button>
     <button data-tab="dice" data-icon="🎲" data-short="Книга дня">🎲 Книга дня</button>
     <button data-tab="stats" data-icon="📊">Статистика</button>
     <button data-tab="awards" data-icon="🏆">Премии</button>
-    <button data-tab="suggest" data-icon="💬" data-short="Предложить">Предложить книгу</button>
+    <button data-tab="suggest" data-icon="💬" data-short="Совет">Посоветовать книгу</button>
     <button data-tab="quiz" data-icon="❓">Квизы</button>
     <button id="nav-more" class="nav-more" type="button" data-icon="☰" data-short="Ещё" aria-haspopup="dialog">Ещё</button>
   </nav>
 </header>
 <dialog id="nav-sheet" class="nav-sheet" aria-label="Все разделы" tabindex="-1"></dialog>
+<dialog id="find-guide" aria-labelledby="find-guide-title">
+  <div class="cardbody">
+    <form method="dialog"><button class="close" aria-label="Закрыть подсказку">×</button></form>
+    <h2 id="find-guide-title">Как найти книгу?</h2>
+    <div class="guide-paths">
+      <button type="button" data-find-tab="pick"><strong>Хочу что-то по настроению</strong><span>Подбор из прочитанного по жанру и настроению.</span></button>
+      <button type="button" data-find-tab="like"><strong>Знаю книгу, хочу похожее</strong><span>Книга с полки или из FantLab → похожие из прочитанного.</span></button>
+      <button type="button" data-find-tab="picks"><strong>Хочу посмотреть готовые списки</strong><span>Тематические подборки и новинки.</span></button>
+    </div>
+  </div>
+</dialog>
 <dialog id="fb" aria-label="Сообщить о проблеме"></dialog>
 <dialog id="pend" aria-label="Что ждёт сохранения"></dialog>
 <div id="update-bar" class="update-bar" role="status" hidden>Вышла новая версия сайта <button id="update-btn" type="button">Обновить</button></div>
@@ -48,8 +59,16 @@
 <main>
   <section id="tab-pick" class="tab active">
     <div id="now-reading" class="now-reading" hidden></div>
+    <div class="pick-intro">
+      <p id="pick-hint" class="hint page-hint">Подбор из прочитанного по жанру, настроению и другим признакам.</p>
+      <div class="pick-actions">
+        <button id="reading-shortcut" class="link" type="button" hidden>Мне почитать</button>
+        <button id="find-guide-open" class="link" type="button" aria-haspopup="dialog">Как найти книгу?</button>
+      </div>
+    </div>
     <div class="ask">
-      <input id="ask" type="search" placeholder="Что хочется почитать? Например: смешное фэнтези, коротко, без жестокости к животным" autocomplete="off">
+      <input id="ask" type="search" aria-label="Что хочется почитать" aria-describedby="pick-hint"
+        placeholder="Например, короткое смешное фэнтези" autocomplete="off">
     </div>
     <div id="understood" class="understood"></div>
     <details id="filters" class="filters">
@@ -70,16 +89,20 @@
   </section>
 
   <section id="tab-like" class="tab">
-    <p class="hint">Назовите несколько книг, которые понравились, — подберу похожие из этой библиотеки и объясню чем.</p>
-    <input id="like-search" type="search" placeholder="Начните вводить название или автора…" autocomplete="off">
-    <div id="like-suggest" class="suggest"></div>
+    <p id="like-hint" class="hint page-hint">Введите книгу с полки или из FantLab. Сайт подберёт похожие из прочитанного. Можно выбрать несколько книг.</p>
+    <input id="like-search" type="search" aria-label="Книга для подбора похожих" aria-describedby="like-hint"
+      placeholder="Название книги или автор" autocomplete="off">
+    <div id="like-suggest" class="suggest like-suggest"></div>
     <div id="like-chosen" class="chips chosen"></div>
     <div id="like-starters" class="starters"></div>
-    <div id="like-list" class="list"></div>
+    <h2 id="like-results-h" class="results-title" hidden>Похожие из прочитанного</h2>
+    <div id="like-list" class="list" aria-labelledby="like-results-h"></div>
   </section>
 
   <section id="tab-all" class="tab">
-    <input id="all-search" type="search" placeholder="Название, автор, тема, рассказ из сборника…" autocomplete="off">
+    <p id="all-hint" class="hint page-hint">Поиск по прочитанному. Можно найти автора, тему или рассказ внутри сборника.</p>
+    <input id="all-search" type="search" aria-label="Поиск по прочитанному" aria-describedby="all-hint"
+      placeholder="Название, автор, тема или рассказ" autocomplete="off">
     <div class="all-tools">
       <label>Сортировка: <select id="all-sort">
         <option value="read">сначала недавно прочитанные</option>
@@ -189,8 +212,7 @@
   </section>
 
   <section id="tab-picks" class="tab">
-    <p class="hint" id="pk-hint">Новые книги и тематические подборки по вашему вкусу. Новинки — с FantLab: только первое издание
-      на русском, без переизданий. Подборка недели и тема месяца меняются сами.</p>
+    <p class="hint page-hint" id="pk-hint">Непрочитанное по темам, новинки FantLab и книги, которые скоро выйдут. В новинках — первые издания на русском.</p>
     <h3 id="pk-week-h"></h3>
     <p class="hint" id="pk-week-hint"></p>
     <div id="pk-week" class="list"></div>

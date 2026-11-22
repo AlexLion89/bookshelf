@@ -44,6 +44,25 @@ input[type=search] { width: 100%; padding: 12px 14px; font: inherit; border: 1px
 .book .why { font-size: 13px; color: var(--accent); margin-top: 4px; }
 .stars { color: #e0a800; font-size: 13px; letter-spacing: 1px; }
 .hint { color: var(--muted); }
+.page-hint { margin: 0 0 10px; }
+.pick-intro { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 0 16px; margin-bottom: 10px; }
+.pick-intro .page-hint { margin: 0; }
+.pick-actions { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.pick-actions .link { font-size: 14px; padding: 6px 0; text-decoration: underline; text-underline-offset: 3px; }
+.results-title { font-size: 18px; margin: 12px 0 8px; }
+.like-suggest section + section { border-top: 1px solid var(--line); }
+.like-suggest h3, .like-suggest p { margin: 0; padding: 7px 12px; font-size: 14px; color: var(--muted); }
+.like-suggest button { display: block; width: 100%; padding: 8px 12px; border: 0; background: none; color: var(--fg);
+  font: inherit; text-align: left; cursor: pointer; }
+.like-suggest button:hover, .like-suggest button:focus-visible { background: var(--accent-soft); }
+.like-suggest button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#find-guide { max-width: 480px; }
+#find-guide-title { padding-right: 28px; }
+.guide-paths { display: grid; gap: 8px; margin-top: 12px; }
+.guide-paths button { display: grid; gap: 3px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg); color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+.guide-paths button:hover, .guide-paths button:focus-visible { border-color: var(--accent); background: var(--accent-soft); }
+.guide-paths span { color: var(--muted); font-size: 14px; }
 .suggest { border: 1px solid var(--line); border-radius: 10px; margin-top: 4px; background: var(--card); max-height: 280px; overflow: auto; }
 .suggest:empty { display: none; }
 .suggest div { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--line); }
